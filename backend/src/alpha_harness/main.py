@@ -25,7 +25,6 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import updates
-from .config import PUBLIC_HOST
 from .api import (
     alphas,
     auth,
@@ -53,6 +52,7 @@ from .api import (
 from .api.auth import Session
 from .api.deps import install_exception_handlers
 from .api.update import stop_server
+from .config import PUBLIC_HOST
 from .schemas import Out
 from .state import AppState
 

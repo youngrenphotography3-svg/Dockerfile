@@ -447,7 +447,7 @@ def group_unit_problem(tree: Node) -> str | None:
     ``densify(industry) * 100`` is refused with *Incompatible unit for input of "multiply"*.
     Found offline, it costs nothing; found by BRAIN, it costs a simulation.
     """
-    groups = set(GROUPING)
+    groups: set[str] = set(GROUPING)
     for _, node in walk(tree):
         if node.kind == "assign" and _is_group(node.args[0], groups):
             groups.add(node.value)
