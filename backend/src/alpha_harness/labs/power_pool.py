@@ -53,6 +53,12 @@ PER_CALL = 20
 #: A Regular Alpha is longer and comes with its reason, so fewer fit in one answer.
 PER_CALL_REGULAR = 10
 FIELDS_PER_CALL = 200
+#: The lab writes in the background, so a call may take longer than a chat answer, and it
+#: asks for little thinking: a long answer with a schema is slow enough without it.
+LLM_TIMEOUT_SECONDS = 420.0
+LLM_THINKING = "LOW"
+#: A prompt beyond this adds latency, not better Alphas, however much the model could take.
+PROMPT_TOKEN_CEILING = 40_000
 #: Price and volume basics every market has, offered beside the chosen datasets' own fields.
 DATA_FIELDS = ("close", "open", "high", "low", "vwap", "volume", "adv20", "returns", "cap")
 PROPOSED = "Written by the LLM; waiting for cores."
@@ -538,7 +544,9 @@ async def _write(optimizer: Optimizer, study_id: int) -> None:
 
         memory = await memory_of(optimizer, study_id, dataset)
         offset = int(by.get(dataset, {}).get("offset", 0))
-        user, shown = user_prompt(ctx, operators, run, memory, offset, model.prompt_tokens)
+        user, shown = user_prompt(
+            ctx, operators, run, memory, offset, min(model.prompt_tokens, PROMPT_TOKEN_CEILING)
+        )
         entry: dict[str, Any] = {
             "at": utcnow().isoformat(),
             "dataset": dataset,
@@ -554,6 +562,8 @@ async def _write(optimizer: Optimizer, study_id: int) -> None:
                 model_ref=model.ref,
                 response_schema=schema(run.mode),
                 temperature=1.0,
+                thinking=LLM_THINKING,
+                wait_seconds=LLM_TIMEOUT_SECONDS,
             )
             answered = True
             items = parse_alphas(answer.text)[:40]

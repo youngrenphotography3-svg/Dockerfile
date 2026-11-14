@@ -220,7 +220,12 @@ async def _plan(body: PowerPoolRequest, state: Any) -> dict[str, Any]:
             fields += len(ctx.fields)
             if prompt is None and info is not None and operators:
                 user, shown = power_pool.user_prompt(
-                    ctx, operators, run, "None yet.", 0, info.prompt_tokens
+                    ctx,
+                    operators,
+                    run,
+                    "None yet.",
+                    0,
+                    min(info.prompt_tokens, power_pool.PROMPT_TOKEN_CEILING),
                 )
                 system = power_pool.system_for(body.mode)
                 prompt = {

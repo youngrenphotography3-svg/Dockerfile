@@ -178,13 +178,17 @@ class LLMService:
         response_schema: dict[str, Any],
         temperature: float,
         thinking: str | None = None,
+        wait_seconds: float | None = None,
     ) -> Answer:
         """Send one prompt, rotating keys by remaining budget. ``model_ref`` names the model
         as :func:`.registry.model_ref` spells it.
 
         ``thinking`` is one of Google's thinking levels. Not a free upgrade: thinking tokens
-        are billed against the same per-minute budget as the answer.
+        are billed against the same per-minute budget as the answer. ``wait_seconds`` is how long to
+        wait for this one answer, where a caller working in the background can afford more
+        than the default.
         """
+        wait = wait_seconds or TIMEOUT_SECONDS
         model = self._model(model_ref)
         estimate = estimate_tokens(system) + estimate_tokens(user)
         tried: set[int] = set()
@@ -223,12 +227,12 @@ class LLMService:
                             schema=schema,
                             reasoning_effort=effort,
                         ),
-                        timeout=TIMEOUT_SECONDS,
+                        timeout=wait,
                     )
                 except TimeoutError as exc:
                     await self.keys.mark(key_id, error="Timed out")
                     raise LLMError(
-                        f"{model.id} did not answer within {TIMEOUT_SECONDS:.0f} seconds. "
+                        f"{model.id} did not answer within {wait:.0f} seconds. "
                         "Try a smaller question or a lighter model."
                     ) from exc
                 except Exception as exc:

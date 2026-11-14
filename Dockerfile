@@ -1,32 +1,35 @@
-# Stage 1: Build TypeScript Frontend
-FROM node:18-alpine AS frontend-builder
+# Stage 1: Build frontend
+# Node 20 (Node 18 is EOL and newer Vite/React toolchains require >=20)
+FROM node:20-alpine AS frontend-builder
 WORKDIR /app/frontend
 COPY frontend/package*.json ./
-RUN npm install
+RUN npm install --no-audit --no-fund
 COPY frontend/ ./
 RUN npm run build
+# Normalize output dir: Vite -> dist, Create React App -> build
+RUN mkdir -p /app/frontend-out && \
+    if [ -d dist ]; then cp -r dist/. /app/frontend-out/; \
+    elif [ -d build ]; then cp -r build/. /app/frontend-out/; \
+    else echo "ERROR: no dist/ or build/ folder produced by npm run build" && exit 1; fi
 
-# Stage 2: Python Backend & Final Runtime Image
+# Stage 2: Python backend + final runtime
 FROM python:3.10-slim
 WORKDIR /app
 
-# Install system dependencies if needed
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies
 COPY backend/requirements.txt ./backend/
-RUN pip install --no-cache-dir -r backend/requirements.txt
+RUN pip install -r backend/requirements.txt
 
-# Copy backend source code
 COPY backend/ ./backend/
+COPY --from=frontend-builder /app/frontend-out ./backend/static
 
-# Copy built frontend assets from Stage 1 into the backend static folder (adjust paths if needed for your project structure)
-COPY --from=frontend-builder /app/frontend/dist ./backend/static
-
-# Expose port for Railway
+# Railway injects $PORT at runtime; the hardcoded 8000 is only a local fallback
 EXPOSE 8000
-
-# Command to run your Python backend server
-CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "-c", "uvicorn backend.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
