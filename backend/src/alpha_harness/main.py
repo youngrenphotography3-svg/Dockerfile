@@ -152,7 +152,17 @@ def create_app() -> FastAPI:
         (same-origin from the Vite proxy, none from a typed URL). The custom header covers
         writes from clients that send no Sec-Fetch-Site.
         """
-        if request.headers.get("sec-fetch-site", "none") not in {"same-origin", "none"}:
+        # A link from another site (the Railway dashboard, a chat) opens the UI as a cross-site
+        # top-level navigation. Serving the static page is harmless; the API stays guarded.
+        is_page_navigation = (
+            request.method == "GET"
+            and request.headers.get("sec-fetch-mode") == "navigate"
+            and not request.url.path.startswith(("/api", "/ws"))
+        )
+        if not is_page_navigation and request.headers.get("sec-fetch-site", "none") not in {
+            "same-origin",
+            "none",
+        }:
             return JSONResponse(
                 {"detail": {"code": "forbidden", "message": "Requests must come from the app."}},
                 status_code=403,
