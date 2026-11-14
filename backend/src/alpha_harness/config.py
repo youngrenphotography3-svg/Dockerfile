@@ -5,20 +5,26 @@ local vault, and nothing reads them from the environment: seeding them from a fi
 let a checked-out repository sign in as its owner.
 """
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
 # Not a setting: the sign-in screen sends the password here, so no file may redirect it.
 BRAIN_API_BASE = "https://api.worldquantbrain.com"
 
-#: The pages that may open the telemetry socket: the Vite dev server, and the built UI the
-#: backend serves itself.
+#: Hostname the app is served from when hosted (Railway injects RAILWAY_PUBLIC_DOMAIN;
+#: PUBLIC_HOST overrides). Unset locally, so nothing changes there.
+PUBLIC_HOST = os.environ.get("PUBLIC_HOST") or os.environ.get("RAILWAY_PUBLIC_DOMAIN") or None
+
+#: The pages that may open the telemetry socket: the Vite dev server, the built UI the
+#: backend serves itself, and the public hostname when hosted.
 ALLOWED_ORIGINS = frozenset(
     {
         "http://localhost:5173",
         "http://127.0.0.1:5173",
         "http://localhost:8000",
         "http://127.0.0.1:8000",
+        *([f"https://{PUBLIC_HOST}"] if PUBLIC_HOST else []),
     }
 )
 

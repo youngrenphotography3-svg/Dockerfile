@@ -52,6 +52,7 @@ from .api import (
 from .api.auth import Session
 from .api.deps import install_exception_handlers
 from .api.update import stop_server
+from .config import PUBLIC_HOST
 from .schemas import Out
 from .state import AppState
 
@@ -139,7 +140,8 @@ def create_app() -> FastAPI:
 
     # DNS rebinding: a page whose hostname resolves to 127.0.0.1 is "same-origin" to the
     # browser, so the header checks below pass. Its Host header still names that hostname.
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1"])
+    hosts = ["localhost", "127.0.0.1", *([PUBLIC_HOST] if PUBLIC_HOST else [])]
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=hosts)
 
     @app.middleware("http")
     async def require_client_header(request: Request, call_next: Any) -> Any:
