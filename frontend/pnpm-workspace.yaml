@@ -1,3 +1,0 @@
-packages:
-  # Dev-only: openapi-typescript with the TypeScript 5 it needs (see its package.json).
-  - tools/*
