@@ -107,6 +107,14 @@ class PowerPoolParams(TaskParams):
     min_operators: int = 10
     max_operators: int = 30
     max_fields: int = 4
+    #: Regular mode only: first sweep every dataset with cheap Power Pool Alphas, then write
+    #: Regular Alphas only for the ``keep_top`` datasets that simulated best.
+    sweep: bool = False
+    #: Simulations the sweep may use. It is on top of the task's own, not taken from them.
+    sweep_budget: int = 200
+    keep_top: int = 3
+    #: ``sweep`` while the sweep runs, ``regular`` after; empty for a task without one.
+    phase: str = ""
     #: What the researcher wants explored, in their words, handed to the LLM on every call.
     focus: str = ""
     #: Hold each written Alpha for the researcher's approval instead of simulating it.

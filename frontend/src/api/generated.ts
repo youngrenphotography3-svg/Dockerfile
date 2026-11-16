@@ -4411,6 +4411,21 @@ export interface components {
              */
             min_operators: number;
             /**
+             * Sweep
+             * @default false
+             */
+            sweep: boolean;
+            /**
+             * Sweep Budget
+             * @default 200
+             */
+            sweep_budget: number;
+            /**
+             * Keep Top
+             * @default 3
+             */
+            keep_top: number;
+            /**
              * Mode
              * @default power_pool
              */

@@ -228,3 +228,103 @@ def test_review_holds_then_approves_or_rejects() -> None:
         assert (again.approved, again.rejected) == (0, 0)
 
     asyncio.run(go())
+
+
+def test_sweep_writes_power_pool_then_regular() -> None:
+    sweep = run(mode="regular", sweep=True, phase="sweep", dataset_ids=["a", "b"])
+    assert pp.sweeping(sweep)
+    assert pp.active(sweep).mode == "power_pool"
+    assert pp.active(sweep.model_copy(update={"phase": "regular"})).mode == "regular"
+    assert not pp.sweeping(run(mode="regular", dataset_ids=["a"]))
+
+
+def test_sweep_budget_is_spread_over_the_datasets() -> None:
+    few = run(mode="regular", sweep=True, phase="sweep", dataset_ids=["a", "b"])
+    assert pp.sweep_calls_each(few) == 5  # 200 / (20 * 2)
+    many = run(mode="regular", sweep=True, phase="sweep", dataset_ids=[str(n) for n in range(30)])
+    assert pp.sweep_calls_each(many) == 1
+    assert not pp.sweep_done(few)
+    few.llm = {"sweepBy": {"a": {"calls": 5}, "b": {"calls": 5}}}
+    assert pp.sweep_done(few)
+    few.llm = {"sweepWritten": 200}
+    assert pp.sweep_done(few)
+
+
+def test_end_sweep_keeps_the_best_datasets() -> None:
+    import asyncio
+    import tempfile
+    from datetime import UTC, datetime
+    from pathlib import Path
+
+    from alpha_harness.db.models import Trial, TrialState
+    from alpha_harness.db.sqlite import Database
+    from alpha_harness.labs import launch
+    from alpha_harness.labs.params import POWER_POOL_SAMPLER
+
+    class Optimizer:
+        def __init__(self, db: Database) -> None:
+            self.db = db
+            self.locks: dict[int, asyncio.Lock] = {}
+
+        def lock(self, study_id: int) -> asyncio.Lock:
+            return self.locks.setdefault(study_id, asyncio.Lock())
+
+        async def notify(self) -> None:
+            return None
+
+    class State:
+        def __init__(self, db: Database) -> None:
+            self.db = db
+            self.optimizer = Optimizer(db)
+
+    async def noop(*_a: object, **_k: object) -> None:
+        return None
+
+    async def go() -> None:
+        db = Database(Path(tempfile.mkdtemp()) / "t.db")
+        await db.create_all()
+        launch.scheduler.start_waiting = noop  # type: ignore[assignment]
+        state = State(db)
+        added = await launch.add_study(
+            state,
+            now=datetime.now(UTC),
+            sampler=POWER_POOL_SAMPLER,
+            params=run(
+                mode="regular",
+                sweep=True,
+                phase="sweep",
+                keep_top=2,
+                dataset_ids=["a", "b", "c"],
+            ),
+            simulations=10,
+            batch_size=3,
+            template_source="",
+        )
+        scores = [("a", 0.5), ("a", 1.0), ("b", 0.2), ("c", 2.0)]
+        async with db.session() as session:
+            for n, (dataset, score) in enumerate(scores):
+                session.add(
+                    Trial(
+                        study_id=added.id,
+                        number=n,
+                        params={"dataset": dataset, "phase": "sweep"},
+                        distributions={},
+                        expression="rank(close)",
+                        settings={},
+                        state=TrialState.COMPLETE,
+                        values=[score],
+                    )
+                )
+        await pp._end_sweep(state.optimizer, added.id)  # type: ignore[arg-type]
+        async with db.session() as session:
+            from alpha_harness.db.models import Study
+            from alpha_harness.labs.params import params_of
+
+            stored = await session.get(Study, added.id)
+            assert stored is not None
+            after = params_of(stored, PowerPoolParams)
+        assert after.dataset_ids == ["c", "a"]
+        assert after.phase == "regular"
+        assert not pp.sweeping(after)
+
+    asyncio.run(go())

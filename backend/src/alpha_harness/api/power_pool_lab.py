@@ -55,6 +55,11 @@ class PowerPoolRequest(BaseModel):
     min_operators: int = Field(default=10, ge=9, le=40)
     max_operators: int = Field(default=30, ge=10, le=80)
     max_fields: int = Field(default=4, ge=1, le=12)
+    #: Regular only: sweep the datasets with Power Pool Alphas first, then write Regular Alphas
+    #: for the ``keep_top`` best. The sweep's budget is on top of ``simulations``.
+    sweep: bool = False
+    sweep_budget: int = Field(default=200, ge=20, le=search.MAX_SIMULATIONS)
+    keep_top: int = Field(default=3, ge=1, le=50)
     #: What the researcher wants explored, in their words.
     focus: str = Field(default="", max_length=1000)
     #: Hold every written Alpha until the researcher approves it.
@@ -240,6 +245,17 @@ async def _plan(body: PowerPoolRequest, state: Any) -> dict[str, Any]:
                         "Max Prompt Tokens, or choose another dataset."
                     )
     calls = -(-body.simulations // power_pool.per_call(body.mode))
+    sweeping = body.sweep and body.mode == power_pool.REGULAR
+    if sweeping:
+        calls += -(-body.sweep_budget // power_pool.PER_CALL)
+        if body.keep_top >= len(dataset_ids) > 0:
+            warnings.append("Keep-top is not fewer than the datasets, so the sweep drops none.")
+        swept = min(len(dataset_ids), body.sweep_budget // power_pool.PER_CALL)
+        if swept < len(dataset_ids):
+            warnings.append(
+                f"A sweep budget of {body.sweep_budget} covers {swept} datasets at one call "
+                f"each; the other {len(dataset_ids) - swept} are not swept. Raise it to cover all."
+            )
     if body.review:
         warnings.append(
             "Review is on: every Alpha the LLM writes waits in the review list until you "
@@ -274,6 +290,7 @@ async def preview(body: PowerPoolRequest, state: State) -> PowerPoolPreview:
 async def add_task(body: PowerPoolRequest, state: State) -> AddedTask:
     if body.simulations < 1:
         raise refuse(422, "no_simulations", NO_SIMULATIONS)
+    sweeping = body.sweep and body.mode == power_pool.REGULAR
     plan = await _plan(body, state)
     if plan["problems"]:
         raise refuse(422, "power_pool_blocked", plan["problems"][0])
@@ -293,6 +310,10 @@ async def add_task(body: PowerPoolRequest, state: State) -> AddedTask:
             min_operators=body.min_operators,
             max_operators=body.max_operators,
             max_fields=body.max_fields,
+            sweep=sweeping,
+            sweep_budget=body.sweep_budget,
+            keep_top=body.keep_top,
+            phase=power_pool.SWEEP if sweeping else "",
             focus=body.focus,
             review=body.review,
             field_filter=(
@@ -304,7 +325,7 @@ async def add_task(body: PowerPoolRequest, state: State) -> AddedTask:
             cores=body.cores,
             llm={"calls": 0},
         ),
-        simulations=body.simulations,
+        simulations=body.simulations + (body.sweep_budget if sweeping else 0),
         batch_size=body.cores * 10,
         template_source=(
             "# LLM Alpha Lab writes its expressions with an LLM; there is no template."

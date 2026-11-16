@@ -64,6 +64,36 @@ DATA_FIELDS = ("close", "open", "high", "low", "vwap", "volume", "adv20", "retur
 PROPOSED = "Written by the LLM; waiting for cores."
 AWAITING = "Written by the LLM; waiting for your review."
 REGULAR = "regular"
+SWEEP = "sweep"
+
+
+def sweeping(run: PowerPoolParams) -> bool:
+    return run.mode == REGULAR and run.sweep and run.phase == SWEEP
+
+
+def active(run: PowerPoolParams) -> PowerPoolParams:
+    """The task as the current phase sees it: the sweep writes Power Pool Alphas."""
+    return run.model_copy(update={"mode": "power_pool"}) if sweeping(run) else run
+
+
+def sweep_calls_each(run: PowerPoolParams) -> int:
+    """LLM calls per dataset: the sweep budget spread over the datasets, at least one each."""
+    return max(1, run.sweep_budget // (PER_CALL * max(1, len(run.dataset_ids))))
+
+
+def sweep_written(run: PowerPoolParams) -> int:
+    return int(run.llm.get("sweepWritten") or 0)
+
+
+def sweep_done(run: PowerPoolParams) -> bool:
+    """Every dataset has had its calls, or the budget's worth of Alphas is written."""
+    by = run.llm.get("sweepBy") or {}
+    each = sweep_calls_each(run)
+    if int(run.llm.get("sweepEmpty") or 0) >= 3:
+        return True
+    return sweep_written(run) >= run.sweep_budget or all(
+        int((by.get(d) or {}).get("calls") or 0) >= each for d in run.dataset_ids
+    )
 
 
 def per_call(mode: str) -> int:
@@ -484,6 +514,12 @@ async def refill(optimizer: Optimizer, row: Study, want: int, waiting: bool) -> 
                 )
                 or 0
             )
+    busy = row.id in _calls and not _calls[row.id].done()
+    if sweeping(run) and sweep_done(run):
+        # Nothing more is written; once the last sweep simulation is back the winners are picked.
+        if not (busy or waiting or ready):
+            await _end_sweep(optimizer, row.id)
+        return sent
     llm = run.llm
     calls = int(llm.get("calls") or 0)
     cap = max(3, 2 * -(-row.max_trials // per_call(run.mode)))
@@ -492,7 +528,6 @@ async def refill(optimizer: Optimizer, row: Study, want: int, waiting: bool) -> 
         if int(llm.get("empty") or 0) >= 3
         else (f"it reached {cap} LLM calls" if calls >= cap else None)
     )
-    busy = row.id in _calls and not _calls[row.id].done()
     if (
         not stop
         and not busy
@@ -503,6 +538,50 @@ async def refill(optimizer: Optimizer, row: Study, want: int, waiting: bool) -> 
     elif stop and not busy and not (waiting or sent or left):
         await scheduler.finish(optimizer, row.id, StudyStatus.COMPLETE, f"Stopped: {stop}.")
     return sent
+
+
+async def _end_sweep(optimizer: Optimizer, study_id: int) -> None:
+    """Keep the ``keep_top`` datasets whose sweep simulated best, and start the Regular pass.
+
+    A dataset is ranked by its best score among the sweep's finished simulations. When none
+    scored, every dataset is kept rather than ending the task on a sweep that proved nothing.
+    """
+    score = func.json_extract(Trial.values, "$[0]")
+    async with optimizer.lock(study_id), optimizer.db.session() as session:
+        stored = await session.get(Study, study_id)
+        if stored is None:
+            return
+        run = params_of(stored, PowerPoolParams)
+        if not sweeping(run):
+            return
+        rows = (
+            await session.execute(
+                select(func.json_extract(Trial.params, "$.dataset"), func.max(score))
+                .where(
+                    Trial.study_id == study_id,
+                    Trial.state == TrialState.COMPLETE,
+                    func.json_extract(Trial.params, "$.phase") == SWEEP,
+                    score > FAILURE,
+                )
+                .group_by(func.json_extract(Trial.params, "$.dataset"))
+            )
+        ).all()
+        best = {str(d): float(v) for d, v in rows if d in run.dataset_ids}
+        ranked = sorted(best, key=lambda d: (-best[d], run.dataset_ids.index(d)))
+        kept = ranked[: max(1, run.keep_top)] or list(run.dataset_ids)
+        run.dataset_ids = kept
+        run.phase = REGULAR
+        run.llm = dict(run.llm) | {
+            "empty": 0,
+            "sweepRanking": [{"dataset": d, "best": best[d]} for d in ranked],
+        }
+        stored.sampler_params = run.dump()
+        stored.message = (
+            f"Sweep done: writing Regular Alphas for {', '.join(kept)}."
+            if ranked
+            else "Sweep scored nothing; writing Regular Alphas for every dataset."
+        )
+    await optimizer.notify()
 
 
 async def _pause(optimizer: Optimizer, study_id: int, message: str) -> None:
@@ -521,8 +600,12 @@ async def _write(optimizer: Optimizer, study_id: int) -> None:
         if row is None or row.status != StudyStatus.RUNNING:
             return None
         run = params_of(row, PowerPoolParams)
+        act = active(run)
+        phase_sweep = sweeping(run)
         llm = dict(run.llm)
-        by = dict(llm.get("byDataset") or {})
+        # The sweep keeps its own tally, so the Regular pass starts from none.
+        key = "sweepBy" if phase_sweep else "byDataset"
+        by = dict(llm.get(key) or {})
         ids = run.dataset_ids
         dataset = min(ids, key=lambda d: (by.get(d, {}).get("calls", 0), ids.index(d)))
         model = optimizer.llm.registry.get(run.model)
@@ -565,7 +648,7 @@ async def _write(optimizer: Optimizer, study_id: int) -> None:
         memory = await memory_of(optimizer, study_id, dataset)
         offset = int(by.get(dataset, {}).get("offset", 0))
         user, shown = user_prompt(
-            ctx, operators, run, memory, offset, min(model.prompt_tokens, PROMPT_TOKEN_CEILING)
+            ctx, operators, act, memory, offset, min(model.prompt_tokens, PROMPT_TOKEN_CEILING)
         )
         entry: dict[str, Any] = {
             "at": utcnow().isoformat(),
@@ -577,10 +660,10 @@ async def _write(optimizer: Optimizer, study_id: int) -> None:
         answered = False
         try:
             answer = await optimizer.llm.generate(
-                system=system_for(run.mode),
+                system=system_for(act.mode),
                 user=user,
                 model_ref=model.ref,
-                response_schema=schema(run.mode),
+                response_schema=schema(act.mode),
                 temperature=1.0,
                 thinking=LLM_THINKING,
                 wait_seconds=LLM_TIMEOUT_SECONDS,
@@ -622,22 +705,24 @@ async def _write(optimizer: Optimizer, study_id: int) -> None:
                 idea = str(item.get("hypothesis") or "").strip()[:600]
                 number += 1
                 try:
-                    expression, used = check(text, ctx, table, run)
+                    expression, used = check(text, ctx, table, act)
                     if expression in seen:
                         raise Rejected("Already written in this task.")
-                    settings = draw(rng, used, ctx, run)
+                    settings = draw(rng, used, ctx, act)
                     seen.add(expression)
                     valid += 1
                     session.add(
                         Trial(
                             study_id=study_id,
                             number=number,
-                            params={"dataset": dataset, "idea": idea},
+                            params={"dataset": dataset, "idea": idea}
+                            | ({"phase": SWEEP} if phase_sweep else {}),
                             distributions={},
                             expression=expression,
                             settings=settings,
                             state=TrialState.PRUNED,
-                            message=AWAITING if run.review else PROPOSED,
+                            # A sweep probe is only read for its score, so it is never held.
+                            message=AWAITING if run.review and not phase_sweep else PROPOSED,
                         )
                     )
                 except Rejected as exc:
@@ -646,7 +731,8 @@ async def _write(optimizer: Optimizer, study_id: int) -> None:
                         Trial(
                             study_id=study_id,
                             number=number,
-                            params={"dataset": dataset, "rejected": True, "idea": idea},
+                            params={"dataset": dataset, "rejected": True, "idea": idea}
+                            | ({"phase": SWEEP} if phase_sweep else {}),
                             distributions={},
                             expression=text[:2000],
                             settings={},
@@ -662,14 +748,18 @@ async def _write(optimizer: Optimizer, study_id: int) -> None:
             # A call that failed showed the model nothing: the same fields go out again next
             # time, and it counts toward neither the call nor the empty-answer stops.
             if answered:
-                llm["calls"] = int(llm.get("calls") or 0) + 1
-                llm["empty"] = 0 if valid else int(llm.get("empty") or 0) + 1
-                by = dict(llm.get("byDataset") or {})
+                tally = "sweepCalls" if phase_sweep else "calls"
+                miss = "sweepEmpty" if phase_sweep else "empty"
+                llm[tally] = int(llm.get(tally) or 0) + 1
+                llm[miss] = 0 if valid else int(llm.get(miss) or 0) + 1
+                if phase_sweep:
+                    llm["sweepWritten"] = int(llm.get("sweepWritten") or 0) + valid
+                by = dict(llm.get(key) or {})
                 mine = dict(by.get(dataset) or {})
                 mine["calls"] = int(mine.get("calls") or 0) + 1
                 mine["offset"] = offset + shown
                 by[dataset] = mine
-                llm["byDataset"] = by
+                llm[key] = by
             entry |= {"valid": valid, "rejected": rejected}
             params.llm = llm
             params.calls = [*params.calls, entry][-100:]

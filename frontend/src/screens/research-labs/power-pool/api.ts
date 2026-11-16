@@ -31,6 +31,11 @@ export interface PowerPoolRequest {
   min_operators: number
   max_operators: number
   max_fields: number
+  /** Regular only: sweep the datasets with Power Pool Alphas first, then write Regular Alphas for the best `keep_top`. */
+  sweep: boolean
+  /** Simulations the sweep may use, on top of the task's own. */
+  sweep_budget: number
+  keep_top: number
   /** What the LLM should explore, in the researcher's words. */
   focus: string
   /** Hold every written Alpha until it is approved. */
