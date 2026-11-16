@@ -54,7 +54,7 @@ import {
 } from './api'
 import { TemplateBlocks } from './blocks'
 import { TemplateEditor } from './editor'
-import { Facts, GALLERY, galleryKey, savedKey, TemplatesPanel } from './gallery'
+import { Facts, GALLERY, galleryKey, type Speed, savedKey, TemplatesPanel } from './gallery'
 import { useTemplateLab } from './state'
 import { defaultOf, namesIn, resolve, VariablesPanel } from './variables'
 
@@ -69,6 +69,8 @@ interface Openable {
   name: string
   text: string
   variables: Record<string, VariableDef>
+  /** A built-in family's speed: its settings then start from the region's playbook. */
+  speed?: Speed | undefined
 }
 
 const BLANK: Openable = { id: null, name: '', text: '', variables: {} }
@@ -342,18 +344,38 @@ export function TemplateLabScreen() {
     },
   })
 
-  const openTemplate = (next: Openable) => {
-    if (draft.dirty) setOpening(next)
-    else apply(next)
-  }
-  const apply = (next: Openable) => draft.open(next.id, next.name, next.text, next.variables)
-
   const { neutralizations } = useScopeOptions({
     instrumentType: 'EQUITY',
     region: draft.region,
     delay: draft.delay,
     universe: '',
   })
+
+  const openTemplate = (next: Openable) => {
+    if (draft.dirty) setOpening(next)
+    else apply(next)
+  }
+  const apply = (next: Openable) => {
+    draft.open(next.id, next.name, next.text, next.variables)
+    if (next.speed) startFrom(next.speed)
+  }
+  /** Decay, truncation and neutralizations where the region's playbook starts this speed. */
+  const startFrom = (speed: Speed) => {
+    const book = options.data?.playbook[draft.region]
+    const pace = book?.paces[speed]
+    if (!book || !pace) return
+    const legal = new Set(neutralizations.map((n) => n.value))
+    set({
+      decay: String(pace.decay),
+      truncation: String(pace.truncation),
+      neutralizations: book.neutralizations.filter((n) => legal.size === 0 || legal.has(n)),
+    })
+    toast.success(
+      `${draft.region}: decay ${pace.decay}, truncation ${pace.truncation}` +
+        (book.symmetric ? '' : '; -alpha is not the opposite here, so search $sign') +
+        (book.note ? `. ${book.note}` : ''),
+    )
+  }
 
   return (
     <Page>
@@ -417,7 +439,7 @@ export function TemplateLabScreen() {
         selected={draft.templateId}
         dirty={draft.dirty}
         cards={cardInfo}
-        onOpenText={(text) => openTemplate({ ...BLANK, text })}
+        onOpenText={(text, family) => openTemplate({ ...BLANK, text, speed: family?.speed })}
         onOpenSaved={(t) =>
           openTemplate({ id: t.id, name: t.name, text: t.text, variables: t.variables })
         }

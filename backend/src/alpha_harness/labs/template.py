@@ -49,6 +49,24 @@ PRESETS: dict[str, str] = {
     "power": "0.5, 1, 2",
     "ts_op": "ts_rank, ts_zscore, ts_delta, ts_av_diff",
     "group_op": "group_rank, group_zscore, group_neutralize",
+    # Used by the built-in families read off submitted USA Alphas (see labs/playbook.py).
+    "recency_lookback": "20, 60, 155, 180, 252",
+    "history_lookback": "126, 129, 252, 300",
+    "compress": "0.1, 0.135, 0.5, 1",
+    "gate": "0.27, 0.5, 0.67, 0.8, 0.95",
+    "sign": "1, -1",
+    "reversal": "rank(-ts_delta(close, 1)), rank(-ts_delta(close, 1) / ts_std_dev(close, 30)), "
+    "rank(-ts_delta(close, 3))",
+    "vol_group": 'bucket(rank(ts_std_dev(returns, 120)), range="0.1, 1, 0.1"), '
+    'bucket(rank(ts_std_dev(returns, 120)), range="0.2, 1, 0.2")',
+    "country_group": "densify(group_cartesian_product(country, industry)), "
+    "densify(group_cartesian_product(country, sector))",
+    "iv_skew": "implied_volatility_call_30 - implied_volatility_put_30, "
+    "implied_volatility_call_120 - implied_volatility_put_120, "
+    "implied_volatility_call_270 - implied_volatility_put_270, "
+    "implied_volatility_call_720 - implied_volatility_put_720",
+    "pcr": "pcr_oi_120, pcr_oi_180, pcr_oi_270",
+    "pcr_cap": "0.17, 0.2, 0.5, 1",
 }
 #: maxTrade and maxPosition for each Investability a task can search. BRAIN refuses both ON.
 INVESTABILITY: dict[str, tuple[str, str]] = {

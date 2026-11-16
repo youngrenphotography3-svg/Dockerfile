@@ -4058,6 +4058,13 @@ export interface components {
             /** Field Ids */
             field_ids?: string[];
         };
+        /** Pace */
+        Pace: {
+            /** Decay */
+            decay: number;
+            /** Truncation */
+            truncation: number;
+        };
         /** Pair */
         Pair: {
             /** Maxposition */
@@ -4786,6 +4793,24 @@ export interface components {
             total: number;
             /** Universes */
             universes: string[];
+        };
+        /**
+         * RegionPlaybook
+         * @description Where a built-in family's settings start in one region.
+         */
+        RegionPlaybook: {
+            /** Maxturnover */
+            maxTurnover: number;
+            /** Neutralizations */
+            neutralizations: string[];
+            /** Note */
+            note: string;
+            /** Paces */
+            paces: {
+                [key: string]: components["schemas"]["Pace"];
+            };
+            /** Symmetric */
+            symmetric: boolean;
         };
         /**
          * ResolveOptionsRequest
@@ -5648,6 +5673,10 @@ export interface components {
             /** Maxsimulations */
             maxSimulations: number;
             operators: components["schemas"]["OperatorsRead"];
+            /** Playbook */
+            playbook: {
+                [key: string]: components["schemas"]["RegionPlaybook"];
+            };
             /** Presets */
             presets: {
                 [key: string]: string;

@@ -14,6 +14,9 @@ import { BACKDROP } from '@/ui/overlay'
 import type { TemplateStats, TemplateSummary, VariableDef } from './api'
 import { namesIn } from './variables'
 
+/** How fast a family's signal moves: where its decay and truncation start (labs/playbook.py). */
+export type Speed = 'fast' | 'medium' | 'slow'
+
 /** A built-in template: an idea, and complete templates built on it. */
 export interface Family {
   /** The idea as the gallery shows it: its lookback written d, its signals `...`. */
@@ -22,6 +25,11 @@ export interface Family {
   text: string
   /** Complete templates built on it, as typed. */
   variations: string[]
+  /** What it is called, and the economics it trades on, in a line each. */
+  name?: string
+  idea?: string
+  /** Opening it starts decay, truncation and neutralization from the region's playbook. */
+  speed?: Speed
 }
 
 export const GALLERY: Family[] = [
@@ -31,6 +39,137 @@ export const GALLERY: Family[] = [
     variations: [
       'r = rank($field);\nif_else(abs(ts_arg_min(low, $lookback) - ts_arg_max(high, $lookback)) > $lookback / 2, r, 1 - r)',
       'rank(if_else(abs(ts_arg_min(low, $lookback) - ts_arg_max(high, $lookback)) > $lookback / 2, $field, -$field))',
+    ],
+  },
+  // Read off 48 submitted USA Alphas. Each `$variable` named after a data category takes that
+  // category's fields in whichever region is chosen, so every family runs in every region.
+  {
+    name: 'Event recency',
+    idea: 'Days since a field last peaked: analyst and news events matter most just after they happen.',
+    speed: 'slow',
+    shown: 'ts_arg_max(ts_backfill(analyst, 20), d) ^ p',
+    text: 'ts_arg_max(ts_backfill($analyst, 20), $recency_lookback) ^ $compress',
+    variations: [
+      'ts_arg_max(ts_backfill(vec_avg($news), 20), $recency_lookback) ^ $compress',
+      'ts_arg_min(ts_backfill($model, 20), $recency_lookback) ^ $compress',
+      'ts_mean(trade_when(news_tot_ticks > 5, ts_arg_max(ts_arg_min($news_b, 5), 760), -1), 352)',
+    ],
+  },
+  {
+    name: 'Own-history rank',
+    idea: 'A fundamental ranked against its own past, so levels that differ between companies drop out.',
+    speed: 'slow',
+    shown: 'sign * ts_rank(ts_backfill(fundamental, 60), d)',
+    text: '$sign * ts_rank(ts_backfill($fundamental, 60), $history_lookback)',
+    variations: [
+      '$sign * ts_rank(ts_backfill($model, 60), $history_lookback)',
+      'group_neutralize(ts_backfill(ts_av_diff(-ts_rank($fundamental, 30), 600), 252), $group)',
+    ],
+  },
+  {
+    name: 'Contrarian attention',
+    idea: 'Heavy social or sentiment buzz pushes prices past fair value, then reverts.',
+    speed: 'fast',
+    shown: '-ts_backfill(sentiment, d)',
+    text: '-ts_backfill($sentiment, $fast_lookback)',
+    variations: [
+      '-ts_backfill($socialmedia, $fast_lookback)',
+      's = -zscore(ts_backfill($socialmedia, 2));\ntrade_when(rank(ts_backfill($socialmedia, 2)) > $gate, ts_decay_linear(s, 10), -1)',
+    ],
+  },
+  {
+    name: 'Option skew in volatility buckets',
+    idea: 'Calls priced over puts flag informed bullish buying; buckets remove the volatility effect.',
+    speed: 'medium',
+    shown: 'ts_mean(group_neutralize(iv_call - iv_put, vol_bucket), d)',
+    text: 'ts_mean(group_neutralize($iv_skew, $vol_group), $lookback)',
+    variations: [
+      's = zscore($iv_skew);\nl = rank(volume * close);\nts_decay_linear(s, 5) * l + ts_decay_linear(s, 10) * (1 - l)',
+    ],
+  },
+  {
+    name: 'Skew with put/call gate',
+    idea: 'Trade the skew only where open interest is call-heavy, confirming the bullish read.',
+    speed: 'medium',
+    shown: 'trade_when(pcr < cap, iv_call - iv_put, -1)',
+    text: 'trade_when($pcr < $pcr_cap, $iv_skew, -1)',
+    variations: [
+      'a = ts_mean($iv_skew, 30);\nts_backfill(trade_when(ts_rank(a, 30) > 0.75, a, -1), 20)',
+    ],
+  },
+  {
+    name: 'Sentiment, else reversal',
+    idea: 'Lasting good news earns a long; every other stock falls back to short-term reversal.',
+    speed: 'medium',
+    shown: 'rank(ts_sum(news, d)) > q ? 1 : reversal',
+    text: 'rank(ts_sum(vec_avg($news), $slow_lookback)) > $gate ? 1 : $reversal',
+    variations: [
+      'a = rank(ts_sum(vec_avg($news), $slow_lookback)) > $gate ? 1 : $reversal;\ntrade_when(volume > 1.33 * adv20, a, -1)',
+      'rank(ts_sum($sentiment, $slow_lookback)) > $gate ? 1 : $reversal',
+    ],
+  },
+  {
+    name: 'Volume-spike reversal',
+    idea: 'Price pushes on a volume spike are liquidity-driven and revert.',
+    speed: 'fast',
+    shown: 'trade_when(volume spike, -ts_delta(close, d), -1)',
+    text: 'trade_when(ts_arg_max(min(volume, adv20), 5) == 0, -ts_delta(close, $fast_lookback), -1)',
+    variations: [
+      'trade_when(ts_sum(returns > 0.027, 17), -((2 * close - high - low) / (high - low)), -1)',
+    ],
+  },
+  {
+    name: 'Volatility-regime reversal',
+    idea: 'Reversal works best when volatility and volume are both high.',
+    speed: 'fast',
+    shown: 'trade_when(high vol and volume, reversal + volume, -1)',
+    text: 'r = close / ts_delay(close, 1) - 1;\nw = ts_rank(ts_std_dev(r, 60), 126) > 0.63 && ts_rank(volume / adv20, 5) > 0.7;\nmr = -rank((close - ts_delay(close, 2)) / ts_delay(close, 2) / ts_std_dev(r, 20));\ntrade_when(w, 0.7 * mr + 0.3 * rank(volume / adv20), -1)',
+    variations: [
+      'r = close / ts_delay(close, 1) - 1;\nmr = -rank((high - ts_delay(high, 2)) / ts_delay(high, 2) / ts_std_dev(r, 20));\ne = group_neutralize(rank($fundamental), bucket(rank(cap), range="0, 1, 0.1667"));\ntrade_when(ts_rank(ts_std_dev(r, 60), 126) > 0.64, 0.4 * mr + 0.4 * rank(ts_delay(volume, 10) / adv20) + 0.2 * e, -1)',
+    ],
+  },
+  {
+    name: 'Calm-and-quality gate',
+    idea: 'Cheap profitability, traded only in calm stocks that have not just fallen.',
+    speed: 'medium',
+    shown: 'trade_when(calm, ts_mean(ts_rank(fundamental / cap, d), 5) * rank(volume), -1)',
+    text: 'trade_when((ts_std_dev(returns, 5) < 0.15) * (close / ts_delay(close, 5) > 0.9), ts_mean(ts_rank($fundamental / cap, 125), 5) * rank(volume), -1)',
+    variations: [
+      'ts_zscore($fundamental / cap, 115) + rank(ts_delta(volume, 3) / ts_mean(volume, 10)) - ts_zscore(ts_delta(close, 2), 70)',
+    ],
+  },
+  {
+    name: 'Leverage change',
+    idea: 'Firms paying down debt beat firms adding it, scaled by size.',
+    speed: 'slow',
+    shown: 'zscore(-ts_delta(fundamental, d) / cap)',
+    text: 'zscore(-ts_delta(ts_backfill($fundamental, 60), $lookback) / cap)',
+    variations: [],
+  },
+  {
+    name: 'Illiquidity',
+    idea: 'Amihud: price impact per dollar traded, averaged and inverted.',
+    speed: 'slow',
+    shown: '-ts_mean(abs(returns) / (volume * close), d)',
+    text: '-ts_mean(abs(returns) / (volume * close), $slow_lookback)',
+    variations: [],
+  },
+  {
+    name: 'Stochastic oversold',
+    idea: 'Long where the close keeps sitting near the day’s low, short near the high.',
+    speed: 'fast',
+    shown: 'ts_decay_linear(ts_rank(stochastic signal, d), 20)',
+    text: 'sto = (close - low) / (high - low + 0.0001);\na = if_else(sto < 0.2, 1, if_else(sto > 0.8, -1, 0));\nts_decay_linear(ts_rank(a, $slow_lookback), 20)',
+    variations: [],
+  },
+  {
+    name: 'Country first',
+    idea: 'For EUR, ASI, GLB and AMR: neutralize by country and industry together before anything else.',
+    shown: 'group_neutralize(..., country × industry)',
+    text: 'group_neutralize(..., $country_group)',
+    variations: [
+      'group_neutralize(ts_rank(ts_backfill($fundamental, 60), $history_lookback), $country_group)',
+      'group_neutralize(-ts_backfill($sentiment, $fast_lookback), $country_group)',
     ],
   },
 ]
@@ -167,7 +306,8 @@ export function TemplatesPanel({
   dirty: boolean
   /** By {@link galleryKey} and {@link savedKey}. */
   cards: Map<string, Card>
-  onOpenText: (text: string) => void
+  /** A built-in template opens with its family, whose speed sets where the settings start. */
+  onOpenText: (text: string, family?: Family) => void
   onOpenSaved: (template: TemplateSummary) => void
   onNew: () => void
 }) {
@@ -193,7 +333,9 @@ export function TemplatesPanel({
                 className={cn(CARD, IDLE)}
                 onClick={() => setFamily(index)}
               >
+                {f.name && <span className="text-title">{f.name}</span>}
                 <Expression>{f.shown}</Expression>
+                {f.idea && <span className="text-body-compact text-ink-subtle">{f.idea}</span>}
                 <span className="flex w-full flex-wrap items-center justify-between gap-x-4 gap-y-1.5">
                   <Facts stats={cards.get(galleryKey(index, null))?.stats} />
                   {f.variations.length > 0 && (
@@ -263,7 +405,7 @@ export function TemplatesPanel({
           onClose={() => setFamily(null)}
           onOpen={(text) => {
             setFamily(null)
-            onOpenText(text)
+            onOpenText(text, GALLERY[family])
           }}
         />
       )}

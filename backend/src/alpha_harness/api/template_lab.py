@@ -16,7 +16,7 @@ from sqlalchemy import func, select
 from ..brain.schemas import TEST_PERIOD, region_label
 from ..catalog.queries import FieldFilter, Tuple4
 from ..db.models import Template, utcnow
-from ..labs import search, template
+from ..labs import playbook, search, template
 from ..labs.fastexpr import MAX_FIELDS, MAX_OPERATORS, Node, ParseError, operator_table, walk
 from ..labs.launch import (
     NO_NEUTRALIZATION,
@@ -102,6 +102,24 @@ class TemplateTask(BaseModel):
     template_name: str = Field(default="Template", max_length=128)
 
 
+class Pace(Out):
+    decay: int
+    truncation: float
+
+
+class RegionPlaybook(Out):
+    """Where a built-in family's settings start in one region."""
+
+    #: To search, the first the one the region's guide puts first.
+    neutralizations: list[str]
+    #: Whether ``-alpha`` is the opposite of ``alpha`` there; if not, search the sign.
+    symmetric: bool
+    max_turnover: float
+    note: str
+    #: Decay and truncation by how fast a family moves.
+    paces: dict[str, Pace]
+
+
 class OperatorDoc(Out):
     name: str
     category: str
@@ -119,6 +137,8 @@ class TemplateLabOptions(Out):
     #: The account's vector operators, for a variable searching matrix and vector fields.
     vector: list[str]
     max_simulations: int
+    #: Per region, the settings a built-in family starts from (labs/playbook.py).
+    playbook: dict[str, RegionPlaybook]
 
 
 class TemplateSummary(Out):
@@ -234,6 +254,7 @@ async def options(state: State, refresh: bool = False) -> TemplateLabOptions:
             "presets": template.PRESETS,
             "vector": list(search.catalogue(operators).vector),
             "maxSimulations": search.MAX_SIMULATIONS,
+            "playbook": playbook.playbook(),
         }
     )
 
