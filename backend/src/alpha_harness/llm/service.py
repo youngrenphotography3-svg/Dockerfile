@@ -33,6 +33,9 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger(__name__)
 
+#: Providers whose chat-completions endpoint holds an answer to a JSON schema.
+SCHEMA_PROVIDERS = frozenset({"google", "openai"})
+
 #: How long a single generation may take before we give up on it.
 TIMEOUT_SECONDS = 180.0
 
@@ -47,10 +50,12 @@ class Answer:
     output_tokens: int
     thinking_tokens: int
     total_tokens: int
+    #: The provider stopped at its output ceiling: the text ends mid-answer.
+    truncated: bool = False
 
     @property
     def usage(self) -> dict[str, int]:
-        return camel_dict(self, exclude=("text", "model"))
+        return camel_dict(self, exclude=("text", "model", "truncated"))
 
 
 def _status(exc: Exception) -> int | None:
@@ -60,31 +65,52 @@ def _status(exc: Exception) -> int | None:
 def _is_rate_limit(exc: Exception) -> tuple[bool, bool]:
     """``(rate limited, daily)``. Only the provider's details say which limit was hit."""
     text = str(exc).lower()
-    limited = _status(exc) == 429 or "resource_exhausted" in text or "quota" in text
+    # Not "insufficient_quota": that is OpenAI's word for an empty balance, which no amount
+    # of waiting or rotating fixes, and treating it as a rate limit hid it.
+    billing = "insufficient_quota" in text or "credit balance" in text
+    limited = not billing and (
+        _status(exc) == 429 or "resource_exhausted" in text or "quota" in text
+    )
     daily = "per day" in text or "perday" in text or "daily" in text or "requests per day" in text
     return limited, daily
 
 
-def _plain_reason(exc: Exception) -> str | None:
+def _plain_reason(exc: Exception, provider: str = "google") -> str | None:
     """The common failures, said in words the person reading them can act on.
 
-    Google's errors arrive as a wall of JSON; the raw text is still kept against the key as
-    ``lastError`` for anyone who wants it.
+    Providers' errors arrive as a wall of JSON; the raw text is still kept against the key
+    as ``lastError`` for anyone who wants it. fix: these used to name Google whatever the
+    provider was, so an Anthropic or OpenAI refusal read as a Google AI Studio problem.
     """
     text, status = str(exc).lower(), _status(exc)
-    if "api_key_invalid" in text or "api key not valid" in text or "unauthenticated" in text:
+    spec = PROVIDERS.get(provider)
+    label = spec.label if spec else provider
+    where = f" at {spec.onboarding_url}" if spec else ""
+    if "credit balance" in text or "insufficient_quota" in text or "billing" in text:
         return (
-            "That Google AI Studio key was not accepted. Check it was copied whole, and "
-            "that it has not been deleted at aistudio.google.com."
+            f"{label} refused the request for billing: the account behind this key has no "
+            f"credit left, or no payment method. Add credit{where}, then try again."
         )
-    if status == 403 or "permission_denied" in text:
+    if (
+        status == 401
+        or "api_key_invalid" in text
+        or "api key not valid" in text
+        or "unauthenticated" in text
+        or "authentication_error" in text
+        or "invalid x-api-key" in text
+    ):
         return (
-            "Google refused that key. It may not have access to this model, or the "
-            "project it belongs to may have been closed."
+            f"That {label} key was not accepted. Check it was copied whole, and that it "
+            f"has not been deleted or disabled{where}."
+        )
+    if status == 403 or "permission_denied" in text or "permission_error" in text:
+        return (
+            f"{label} refused that key. It may not have access to this model, or the "
+            "account or project it belongs to may have been closed."
         )
     if status == 404 or ("not found" in text and "model" in text):
         return "That model is not available to this key. Pick a different one."
-    if status == 503:
+    if status in (502, 503, 504, 529) or "overloaded" in text:
         return (
             "That model is overloaded right now, which usually passes within a minute. "
             "Try again, or pick another model."
@@ -153,7 +179,13 @@ class LLMService:
         spec = PROVIDERS.get(provider)
         if spec is None:
             raise LLMError(f"{provider!r} is not a provider this application knows.")
-        return OpenAICompatible(spec.base_url, secret, self._http)
+        return OpenAICompatible(
+            spec.base_url,
+            secret,
+            self._http,
+            headers=spec.headers_for(secret),
+            max_tokens=spec.max_tokens,
+        )
 
     def _model(self, ref: str | None) -> ModelInfo:
         """The model asked for, or with none named, the set-up one with most to spend."""
@@ -194,9 +226,10 @@ class LLMService:
         tried: set[int] = set()
         refusal: LLMError | None = None
         effort = _effort(model, thinking)
-        # Google holds the answer to the schema. The others are only asked for a JSON object,
-        # which not all of them honour either; the prompt names the keys it needs.
-        schema = response_schema if model.provider == "google" else None
+        # Google and OpenAI hold the answer to the schema. The others are only asked for a
+        # JSON object, which not all of them honour either (Anthropic's compatibility layer
+        # ignores ``response_format`` outright); the prompt names the keys it needs.
+        schema = response_schema if model.provider in SCHEMA_PROVIDERS else None
         sampling = None if model.ref in self._default_sampling else temperature
 
         while True:
@@ -254,7 +287,8 @@ class LLMService:
                         log.warning("llm.rate_limited", key_id=key_id, model=model.id, daily=daily)
                         continue
                     error = LLMError(
-                        _plain_reason(exc) or f"{model.id} could not be reached: {exc}"
+                        _plain_reason(exc, model.provider)
+                        or f"{model.id} could not be reached: {exc}"
                     )
                     if _refused(exc):
                         log.warning("llm.key_refused", key_id=key_id, model=model.id)
@@ -281,6 +315,7 @@ class LLMService:
                     output_tokens=output,
                     thinking_tokens=thought,
                     total_tokens=total,
+                    truncated=bool(usage.get("truncated")),
                 )
             finally:
                 self.ledger.settled(key_id, model)
@@ -306,7 +341,9 @@ class LLMService:
         # Any provider failure is the key test's answer, stored and shown to the user.
         except Exception as exc:  # noqa: BLE001
             await self.keys.mark(key_id, error=str(exc)[:300])
-            return {"keyId": key_id, "ok": False, "error": str(exc)[:300]}
+            reason = _plain_reason(exc, provider)
+            shown = f"{reason} ({str(exc)[:200]})" if reason else str(exc)[:300]
+            return {"keyId": key_id, "ok": False, "error": shown}
 
         await self.keys.mark(key_id)
         return {"keyId": key_id, "ok": True, "models": len(names)}
@@ -324,4 +361,4 @@ class LLMService:
             return {"models": await self._listed(provider, rows[0].id), "error": None}
         # The reason is shown beside the field where the id can still be typed.
         except Exception as exc:  # noqa: BLE001
-            return {"models": [], "error": str(exc)[:300]}
+            return {"models": [], "error": _plain_reason(exc, provider) or str(exc)[:300]}

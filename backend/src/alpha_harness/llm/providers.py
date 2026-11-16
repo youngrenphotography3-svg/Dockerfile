@@ -14,7 +14,7 @@ looks at budget.
 up with the limits their provider shows them; ``limits_url`` is where to look.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ..schemas import Out
 
@@ -38,6 +38,19 @@ class Provider:
     paid: bool = False
     #: What a paid tier bills, in plain words; shown above its key field.
     tier_note: str = ""
+    #: What every key of this provider must start with, so a key pasted under the wrong
+    #: provider is refused when it is added instead of failing later as "invalid header".
+    key_prefixes: tuple[str, ...] = ()
+    #: Prefixes that belong to *another* provider and so are never right here.
+    foreign_prefixes: tuple[str, ...] = ()
+    #: Sent with every request, the key among them where ``{key}`` appears. For a provider
+    #: whose native endpoints do not take the Bearer token the OpenAI SDK sends.
+    headers: dict[str, str] = field(default_factory=dict)
+    #: An output ceiling to send, for a provider that requires one or cuts answers short.
+    max_tokens: int | None = None
+
+    def headers_for(self, key: str) -> dict[str, str]:
+        return {name: value.replace("{key}", key) for name, value in self.headers.items()}
 
 
 class LLMProvider(Out):
@@ -67,6 +80,7 @@ PROVIDERS: dict[str, Provider] = {
         onboarding_url="https://aistudio.google.com/apikey",
         limits_url="https://aistudio.google.com/rate-limit",
         key_hint="AIza…",
+        key_prefixes=("AIza",),
     ),
     "groq": Provider(
         id="groq",
@@ -91,6 +105,7 @@ PROVIDERS: dict[str, Provider] = {
         onboarding_url="https://openrouter.ai/keys",
         limits_url="https://openrouter.ai/docs/api-reference/limits",
         key_hint="sk-or-…",
+        key_prefixes=("sk-or-",),
     ),
     "nvidia": Provider(
         id="nvidia",
@@ -139,6 +154,7 @@ PROVIDERS: dict[str, Provider] = {
         onboarding_url="https://platform.openai.com/api-keys",
         limits_url="https://platform.openai.com/settings/organization/limits",
         key_hint="sk-…",
+        foreign_prefixes=("sk-ant-", "sk-or-"),
         tier_note="Your own OpenAI account — billed to you, not free.",
         paid=True,
     ),
@@ -150,13 +166,25 @@ PROVIDERS: dict[str, Provider] = {
         # differs that matter here are that ``response_format`` is ignored — callers already
         # ask for JSON in the prompt and parse defensively — and that thinking output is not
         # returned, which nothing here reads.
+        #
+        # fix: only ``/chat/completions`` takes the Bearer token. ``/v1/models`` — which the
+        # key check and the model picker call — is Anthropic's *native* endpoint and answers
+        # 401 "x-api-key header is required" (then 400 for a missing anthropic-version) to the
+        # Bearer-only request the SDK sends, so no Anthropic key could ever be checked or
+        # have its models listed. Both headers go on every request; the compatibility
+        # endpoint accepts them too.
         label="Anthropic Claude",
         base_url="https://api.anthropic.com/v1",
         onboarding_url="https://platform.claude.com/settings/keys",
         limits_url="https://platform.claude.com/settings/limits",
         key_hint="sk-ant-…",
+        key_prefixes=("sk-ant-",),
         tier_note="Your own Anthropic account — billed to you, not free.",
         paid=True,
+        headers={"x-api-key": "{key}", "anthropic-version": "2023-06-01"},
+        # The Messages API behind the compatibility layer needs a ceiling; twenty Alphas in
+        # JSON run to a few thousand tokens, and a cut-off answer is a whole call wasted.
+        max_tokens=16_000,
     ),
 }
 

@@ -80,6 +80,51 @@ class BudgetExhaustedError(LLMError):
         self.daily = bool(daily) and len(daily) == len(states)
 
 
+#: What people paste around a key when they copy it from a curl example or a .env file.
+_WRAPPERS = ("authorization:", "x-api-key:", "bearer ", "api_key=", "anthropic_api_key=")
+
+
+def clean_key(key: str) -> str:
+    """The key itself, without the header name, quotes or line breaks copied with it.
+
+    A key pasted as ``x-api-key: sk-ant-…`` or ``"sk-ant-…"`` was otherwise stored as-is
+    and sent in an Authorization header the provider could not read.
+    """
+    text = "".join(key.split())  # every space and line break; no key contains one
+    changed = True
+    while changed:
+        changed = False
+        for wrapper in _WRAPPERS:
+            if text.lower().startswith(wrapper.replace(" ", "")):
+                text = text[len(wrapper.replace(" ", "")) :]
+                changed = True
+        if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'`":
+            text = text[1:-1]
+            changed = True
+    return text
+
+
+def prefix_problem(key: str, provider: str) -> str | None:
+    """Why ``key`` cannot be a key for ``provider``, judged by its prefix alone."""
+    spec = providers.get(provider)
+    for other in providers.PROVIDERS.values():
+        if other.id != spec.id and other.key_prefixes and key.startswith(other.key_prefixes):
+            if spec.key_prefixes and key.startswith(spec.key_prefixes):
+                continue  # a longer prefix of this provider's own (sk-or- vs sk-)
+            return (
+                f"That looks like a {other.label} key ({other.key_hint}), not a {spec.label} "
+                f"key. Add it under {other.label} instead."
+            )
+    if key.startswith(spec.foreign_prefixes):
+        return f"That is not a {spec.label} key: {spec.label} keys look like {spec.key_hint}."
+    if spec.key_prefixes and not key.startswith(spec.key_prefixes):
+        return (
+            f"That does not look like a {spec.label} key: they start with {spec.key_hint}. "
+            "Check it was copied whole."
+        )
+    return None
+
+
 def fingerprint(key: str) -> str:
     """Stable identity for a key, so the same one is not added twice.
 
@@ -132,9 +177,14 @@ class KeyStore:
         provider: str = "google",
         daily_limit: int | None = None,
     ) -> ApiKey:
-        clean = key.strip()
+        if provider not in providers.PROVIDERS:
+            # providers.get would quietly file it under Google.
+            raise LLMError(f"{provider!r} is not a provider this application knows.")
+        clean = clean_key(key)
         if not clean:
             raise LLMError("That key is empty.")
+        if problem := prefix_problem(clean, provider):
+            raise LLMError(problem)
         # A free tier stops on its own; a paid account stops when told to. Refusing the key
         # outright is the only point at which the app can be sure it was told — afterwards
         # the key is stored, and anything that reads it can spend money.
