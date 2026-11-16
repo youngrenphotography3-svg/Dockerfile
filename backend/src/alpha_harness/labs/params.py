@@ -113,6 +113,12 @@ class PowerPoolParams(TaskParams):
     #: Simulations the sweep may use. It is on top of the task's own, not taken from them.
     sweep_budget: int = 200
     keep_top: int = 3
+    #: ``template`` writes one fixed set of simple expressions per dataset, with no LLM call,
+    #: so datasets are compared like for like; ``llm`` has the model write the probes.
+    sweep_source: str = "template"
+    #: Datasets just below the ``keep_top`` that still get Regular Alphas, at half the share.
+    keep_extra: int = 1
+    reserve: list[str] = Field(default_factory=list)
     #: ``sweep`` while the sweep runs, ``regular`` after; empty for a task without one.
     phase: str = ""
     #: What the researcher wants explored, in their words, handed to the LLM on every call.

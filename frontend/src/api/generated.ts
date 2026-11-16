@@ -4426,6 +4426,16 @@ export interface components {
              */
             keep_top: number;
             /**
+             * Keep Extra
+             * @default 1
+             */
+            keep_extra: number;
+            /**
+             * Sweep Source
+             * @default template
+             */
+            sweep_source: string;
+            /**
              * Mode
              * @default power_pool
              */

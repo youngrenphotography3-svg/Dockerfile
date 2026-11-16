@@ -15,6 +15,7 @@ DEFS = {
     "multiply": "multiply(x, y, ..., filter = false)",
     "ts_rank": "ts_rank(x, d, constant = 0)",
     "ts_delta": "ts_delta(x, d)",
+    "ts_zscore": "ts_zscore(x, d)",
     "group_rank": "group_rank(x, group)",
     "group_zscore": "group_zscore(x, group)",
     "group_neutralize": "group_neutralize(x, group)",
@@ -239,7 +240,7 @@ def test_sweep_writes_power_pool_then_regular() -> None:
 
 
 def test_sweep_budget_is_spread_over_the_datasets() -> None:
-    few = run(mode="regular", sweep=True, phase="sweep", dataset_ids=["a", "b"])
+    few = run(mode="regular", sweep=True, sweep_source="llm", phase="sweep", dataset_ids=["a", "b"])
     assert pp.sweep_calls_each(few) == 5  # 200 / (20 * 2)
     many = run(mode="regular", sweep=True, phase="sweep", dataset_ids=[str(n) for n in range(30)])
     assert pp.sweep_calls_each(many) == 1
@@ -294,6 +295,7 @@ def test_end_sweep_keeps_the_best_datasets() -> None:
                 sweep=True,
                 phase="sweep",
                 keep_top=2,
+                keep_extra=1,
                 dataset_ids=["a", "b", "c"],
             ),
             simulations=10,
@@ -323,8 +325,34 @@ def test_end_sweep_keeps_the_best_datasets() -> None:
             stored = await session.get(Study, added.id)
             assert stored is not None
             after = params_of(stored, PowerPoolParams)
-        assert after.dataset_ids == ["c", "a"]
+            # Ranked by the mean of the best three, zero-padded: c .67, a .5, b .07. Two kept and
+        # the next one as a reserve.
+        assert after.dataset_ids == ["c", "a", "b"]
+        assert after.reserve == ["b"]
         assert after.phase == "regular"
         assert not pp.sweeping(after)
 
     asyncio.run(go())
+
+
+def test_ranking_uses_the_mean_of_the_best_three_not_one_lucky_score() -> None:
+    ranked = pp.rank_datasets(
+        {"lucky": [3.0, -1.0, -1.0], "steady": [1.0, 0.9, 0.8, 0.1], "thin": [1.2]},
+        ["lucky", "steady", "thin"],
+    )
+    assert [d for d, _ in ranked] == ["steady", "thin", "lucky"]
+    assert dict(ranked)["thin"] == pytest.approx(0.4)  # one score, padded with zeros
+
+
+def test_template_sweep_writes_the_same_shapes_on_every_dataset() -> None:
+    ours = pp.sweep_expressions(ctx(), 10)
+    assert len(ours) == 10
+    assert ours[0] == (0, "rank(ts_backfill(fnd_a, 21))")
+    assert [n for n, _ in ours[:5]] == [0, 1, 2, 3, 4]
+    for _, text in ours:
+        assert pp.check(text, ctx(), TABLE, run(mode="power_pool"))[0]
+    # The template sweep is done once its probes are written, with no LLM call.
+    seeded = run(mode="regular", sweep=True, phase="sweep", dataset_ids=["a"])
+    assert not pp.sweep_done(seeded)
+    seeded.llm = {"sweepSeeded": True}
+    assert pp.sweep_done(seeded)
