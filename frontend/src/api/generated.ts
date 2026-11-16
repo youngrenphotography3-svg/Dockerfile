@@ -4396,6 +4396,16 @@ export interface components {
              */
             focus: string;
             /**
+             * Keep Extra
+             * @default 1
+             */
+            keep_extra: number;
+            /**
+             * Keep Top
+             * @default 3
+             */
+            keep_top: number;
+            /**
              * Max Fields
              * @default 4
              */
@@ -4431,6 +4441,21 @@ export interface components {
              * @default 0
              */
             simulations: number;
+            /**
+             * Sweep
+             * @default false
+             */
+            sweep: boolean;
+            /**
+             * Sweep Budget
+             * @default 200
+             */
+            sweep_budget: number;
+            /**
+             * Sweep Source
+             * @default template
+             */
+            sweep_source: string;
             /** Universe */
             universe: string;
             /** Universes */

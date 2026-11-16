@@ -55,6 +55,16 @@ class PowerPoolRequest(BaseModel):
     min_operators: int = Field(default=10, ge=9, le=40)
     max_operators: int = Field(default=30, ge=10, le=80)
     max_fields: int = Field(default=4, ge=1, le=12)
+    #: Regular only: sweep the datasets with Power Pool Alphas first, then write Regular Alphas
+    #: for the ``keep_top`` best. The sweep's budget is on top of ``simulations``.
+    sweep: bool = False
+    sweep_budget: int = Field(default=200, ge=20, le=search.MAX_SIMULATIONS)
+    keep_top: int = Field(default=3, ge=1, le=50)
+    #: ``template`` probes every dataset with the same fixed expressions and no LLM call;
+    #: ``llm`` has the model write them.
+    sweep_source: str = Field(default="template", pattern="^(template|llm)$")
+    #: Datasets just below the top that still get Regular Alphas, at half the share.
+    keep_extra: int = Field(default=1, ge=0, le=10)
     #: What the researcher wants explored, in their words.
     focus: str = Field(default="", max_length=1000)
     #: Hold every written Alpha until the researcher approves it.
@@ -240,6 +250,26 @@ async def _plan(body: PowerPoolRequest, state: Any) -> dict[str, Any]:
                         "Max Prompt Tokens, or choose another dataset."
                     )
     calls = -(-body.simulations // power_pool.per_call(body.mode))
+    sweeping = body.sweep and body.mode == power_pool.REGULAR
+    if sweeping:
+        n = len(dataset_ids)
+        if body.sweep_source == "llm":
+            calls += -(-body.sweep_budget // power_pool.PER_CALL)
+            swept = min(n, body.sweep_budget // power_pool.PER_CALL)
+        else:
+            swept = min(n, body.sweep_budget)
+            if swept and body.sweep_budget // swept < 10:
+                warnings.append(
+                    f"{body.sweep_budget // swept} probe Alphas per dataset is too few to rank "
+                    "them reliably. Raise the sweep budget or choose fewer datasets."
+                )
+        if swept < n:
+            warnings.append(
+                f"A sweep budget of {body.sweep_budget} covers {swept} datasets; the other "
+                f"{n - swept} are not swept. Raise it to cover all."
+            )
+        if body.keep_top >= n > 0:
+            warnings.append("Keep-top is not fewer than the datasets, so the sweep drops none.")
     if body.review:
         warnings.append(
             "Review is on: every Alpha the LLM writes waits in the review list until you "
@@ -274,6 +304,7 @@ async def preview(body: PowerPoolRequest, state: State) -> PowerPoolPreview:
 async def add_task(body: PowerPoolRequest, state: State) -> AddedTask:
     if body.simulations < 1:
         raise refuse(422, "no_simulations", NO_SIMULATIONS)
+    sweeping = body.sweep and body.mode == power_pool.REGULAR
     plan = await _plan(body, state)
     if plan["problems"]:
         raise refuse(422, "power_pool_blocked", plan["problems"][0])
@@ -293,6 +324,12 @@ async def add_task(body: PowerPoolRequest, state: State) -> AddedTask:
             min_operators=body.min_operators,
             max_operators=body.max_operators,
             max_fields=body.max_fields,
+            sweep=sweeping,
+            sweep_budget=body.sweep_budget,
+            keep_top=body.keep_top,
+            sweep_source=body.sweep_source,
+            keep_extra=body.keep_extra,
+            phase=power_pool.SWEEP if sweeping else "",
             focus=body.focus,
             review=body.review,
             field_filter=(
@@ -304,7 +341,7 @@ async def add_task(body: PowerPoolRequest, state: State) -> AddedTask:
             cores=body.cores,
             llm={"calls": 0},
         ),
-        simulations=body.simulations,
+        simulations=body.simulations + (body.sweep_budget if sweeping else 0),
         batch_size=body.cores * 10,
         template_source=(
             "# LLM Alpha Lab writes its expressions with an LLM; there is no template."

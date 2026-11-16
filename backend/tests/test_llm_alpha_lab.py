@@ -15,6 +15,7 @@ DEFS = {
     "multiply": "multiply(x, y, ..., filter = false)",
     "ts_rank": "ts_rank(x, d, constant = 0)",
     "ts_delta": "ts_delta(x, d)",
+    "ts_zscore": "ts_zscore(x, d)",
     "group_rank": "group_rank(x, group)",
     "group_zscore": "group_zscore(x, group)",
     "group_neutralize": "group_neutralize(x, group)",
@@ -228,3 +229,130 @@ def test_review_holds_then_approves_or_rejects() -> None:
         assert (again.approved, again.rejected) == (0, 0)
 
     asyncio.run(go())
+
+
+def test_sweep_writes_power_pool_then_regular() -> None:
+    sweep = run(mode="regular", sweep=True, phase="sweep", dataset_ids=["a", "b"])
+    assert pp.sweeping(sweep)
+    assert pp.active(sweep).mode == "power_pool"
+    assert pp.active(sweep.model_copy(update={"phase": "regular"})).mode == "regular"
+    assert not pp.sweeping(run(mode="regular", dataset_ids=["a"]))
+
+
+def test_sweep_budget_is_spread_over_the_datasets() -> None:
+    few = run(mode="regular", sweep=True, sweep_source="llm", phase="sweep", dataset_ids=["a", "b"])
+    assert pp.sweep_calls_each(few) == 5  # 200 / (20 * 2)
+    many = run(mode="regular", sweep=True, phase="sweep", dataset_ids=[str(n) for n in range(30)])
+    assert pp.sweep_calls_each(many) == 1
+    assert not pp.sweep_done(few)
+    few.llm = {"sweepBy": {"a": {"calls": 5}, "b": {"calls": 5}}}
+    assert pp.sweep_done(few)
+    few.llm = {"sweepWritten": 200}
+    assert pp.sweep_done(few)
+
+
+def test_end_sweep_keeps_the_best_datasets() -> None:
+    import asyncio
+    import tempfile
+    from datetime import UTC, datetime
+    from pathlib import Path
+
+    from alpha_harness.db.models import Trial, TrialState
+    from alpha_harness.db.sqlite import Database
+    from alpha_harness.labs import launch
+    from alpha_harness.labs.params import POWER_POOL_SAMPLER
+
+    class Optimizer:
+        def __init__(self, db: Database) -> None:
+            self.db = db
+            self.locks: dict[int, asyncio.Lock] = {}
+
+        def lock(self, study_id: int) -> asyncio.Lock:
+            return self.locks.setdefault(study_id, asyncio.Lock())
+
+        async def notify(self) -> None:
+            return None
+
+    class State:
+        def __init__(self, db: Database) -> None:
+            self.db = db
+            self.optimizer = Optimizer(db)
+
+    async def noop(*_a: object, **_k: object) -> None:
+        return None
+
+    async def go() -> None:
+        db = Database(Path(tempfile.mkdtemp()) / "t.db")
+        await db.create_all()
+        launch.scheduler.start_waiting = noop  # type: ignore[assignment]
+        state = State(db)
+        added = await launch.add_study(
+            state,
+            now=datetime.now(UTC),
+            sampler=POWER_POOL_SAMPLER,
+            params=run(
+                mode="regular",
+                sweep=True,
+                phase="sweep",
+                keep_top=2,
+                keep_extra=1,
+                dataset_ids=["a", "b", "c"],
+            ),
+            simulations=10,
+            batch_size=3,
+            template_source="",
+        )
+        scores = [("a", 0.5), ("a", 1.0), ("b", 0.2), ("c", 2.0)]
+        async with db.session() as session:
+            for n, (dataset, score) in enumerate(scores):
+                session.add(
+                    Trial(
+                        study_id=added.id,
+                        number=n,
+                        params={"dataset": dataset, "phase": "sweep"},
+                        distributions={},
+                        expression="rank(close)",
+                        settings={},
+                        state=TrialState.COMPLETE,
+                        values=[score],
+                    )
+                )
+        await pp._end_sweep(state.optimizer, added.id)  # type: ignore[arg-type]
+        async with db.session() as session:
+            from alpha_harness.db.models import Study
+            from alpha_harness.labs.params import params_of
+
+            stored = await session.get(Study, added.id)
+            assert stored is not None
+            after = params_of(stored, PowerPoolParams)
+            # Ranked by the mean of the best three, zero-padded: c .67, a .5, b .07. Two kept and
+        # the next one as a reserve.
+        assert after.dataset_ids == ["c", "a", "b"]
+        assert after.reserve == ["b"]
+        assert after.phase == "regular"
+        assert not pp.sweeping(after)
+
+    asyncio.run(go())
+
+
+def test_ranking_uses_the_mean_of_the_best_three_not_one_lucky_score() -> None:
+    ranked = pp.rank_datasets(
+        {"lucky": [3.0, -1.0, -1.0], "steady": [1.0, 0.9, 0.8, 0.1], "thin": [1.2]},
+        ["lucky", "steady", "thin"],
+    )
+    assert [d for d, _ in ranked] == ["steady", "thin", "lucky"]
+    assert dict(ranked)["thin"] == pytest.approx(0.4)  # one score, padded with zeros
+
+
+def test_template_sweep_writes_the_same_shapes_on_every_dataset() -> None:
+    ours = pp.sweep_expressions(ctx(), 10)
+    assert len(ours) == 10
+    assert ours[0] == (0, "rank(ts_backfill(fnd_a, 21))")
+    assert [n for n, _ in ours[:5]] == [0, 1, 2, 3, 4]
+    for _, text in ours:
+        assert pp.check(text, ctx(), TABLE, run(mode="power_pool"))[0]
+    # The template sweep is done once its probes are written, with no LLM call.
+    seeded = run(mode="regular", sweep=True, phase="sweep", dataset_ids=["a"])
+    assert not pp.sweep_done(seeded)
+    seeded.llm = {"sweepSeeded": True}
+    assert pp.sweep_done(seeded)

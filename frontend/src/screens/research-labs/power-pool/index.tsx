@@ -67,6 +67,11 @@ interface PowerPoolDraft {
   minOperators: number
   maxOperators: number
   maxFields: number
+  sweep: boolean
+  sweepBudget: number
+  keepTop: number
+  keepExtra: number
+  sweepSource: 'template' | 'llm'
   focus: string
   review: boolean
 }
@@ -89,6 +94,11 @@ const useDraft = create<PowerPoolDraft>()(
       minOperators: 10,
       maxOperators: 30,
       maxFields: 4,
+      sweep: true,
+      sweepBudget: 200,
+      keepTop: 3,
+      keepExtra: 1,
+      sweepSource: 'template',
       focus: '',
       review: true,
     }),
@@ -97,7 +107,8 @@ const useDraft = create<PowerPoolDraft>()(
       // Version 1 leaves cores unchosen, so Settings' default for new tasks applies.
       // Version 2 adds universes, none chosen: every downloaded one, as before.
       // Version 3 adds the Regular mode, hand-picked fields, a focus and the review switch.
-      version: 3,
+      // Version 4 adds the dataset sweep before a Regular task; 5, its source and reserve.
+      version: 5,
       migrate: (stored, version) => ({
         ...(stored as PowerPoolDraft),
         ...(version < 1 ? { cores: null } : {}),
@@ -113,6 +124,8 @@ const useDraft = create<PowerPoolDraft>()(
               review: true,
             }
           : {}),
+        ...(version < 4 ? { sweep: true, sweepBudget: 200, keepTop: 3 } : {}),
+        ...(version < 5 ? { keepExtra: 1, sweepSource: 'template' as const } : {}),
       }),
     },
   ),
@@ -161,6 +174,11 @@ export function PowerPoolLabScreen() {
     min_operators: draft.minOperators,
     max_operators: draft.maxOperators,
     max_fields: draft.maxFields,
+    sweep: draft.sweep,
+    sweep_budget: draft.sweepBudget,
+    keep_top: draft.keepTop,
+    keep_extra: draft.keepExtra,
+    sweep_source: draft.sweepSource,
     focus: draft.focus,
     review: draft.review,
   }
@@ -245,6 +263,79 @@ export function PowerPoolLabScreen() {
                   onChange={(e) => set({ maxFields: Math.max(1, Number(e.target.value) || 4) })}
                 />
               </Fieldset>
+            </div>
+          )}
+          {regular && (
+            <div className="flex flex-col gap-4">
+              <div className="flex items-start gap-3">
+                <Switch
+                  aria-label="Sweep the datasets first"
+                  checked={draft.sweep}
+                  onChange={(sweep) => set({ sweep })}
+                />
+                <p className="text-body-compact text-pretty text-ink-subtle">
+                  Sweep the datasets first. The same simple probe Alphas are simulated on every
+                  dataset, with no LLM call, and datasets are ranked by the mean of their best
+                  three. Regular Alphas are then written for the best ones. The sweep has its own
+                  budget, on top of the simulations above.
+                </p>
+              </div>
+              {draft.sweep && (
+                <div className="flex flex-wrap items-start gap-x-8 gap-y-4">
+                  <Fieldset legend="Sweep simulations">
+                    <Input
+                      type="number"
+                      min={20}
+                      step={20}
+                      aria-label="Sweep simulations"
+                      className="w-28"
+                      value={draft.sweepBudget}
+                      onChange={(e) =>
+                        set({ sweepBudget: Math.max(20, Number(e.target.value) || 200) })
+                      }
+                    />
+                  </Fieldset>
+                  <Fieldset legend="Probes written by">
+                    <Segmented
+                      label="Probes written by"
+                      value={draft.sweepSource}
+                      onChange={(sweepSource) => set({ sweepSource })}
+                      items={[
+                        { value: 'template', label: 'Templates · no LLM' },
+                        { value: 'llm', label: 'The LLM' },
+                      ]}
+                    />
+                  </Fieldset>
+                  <Fieldset legend="Datasets to keep">
+                    <Input
+                      type="number"
+                      min={1}
+                      max={50}
+                      step={1}
+                      aria-label="Datasets to keep"
+                      className="w-28"
+                      value={draft.keepTop}
+                      onChange={(e) =>
+                        set({ keepTop: Math.min(50, Math.max(1, Number(e.target.value) || 3)) })
+                      }
+                    />
+                  </Fieldset>
+                  <Fieldset legend="Extra datasets at half share">
+                    <Input
+                      type="number"
+                      min={0}
+                      max={10}
+                      step={1}
+                      aria-label="Extra datasets at half share"
+                      className="w-28"
+                      value={draft.keepExtra}
+                      onChange={(e) =>
+                        set({ keepExtra: Math.min(10, Math.max(0, Number(e.target.value) || 0)) })
+                      }
+                    />
+                  </Fieldset>
+                </div>
+              )}
             </div>
           )}
           <Fieldset legend="What to explore (optional)">
