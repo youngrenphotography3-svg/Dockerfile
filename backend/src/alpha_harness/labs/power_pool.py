@@ -312,6 +312,16 @@ async def memory_of(optimizer: Optimizer, study_id: int, dataset: str) -> str:
                 .limit(20)
             )
         ).all()
+        # fix: the model was only ever shown its best results, so it kept writing variations
+        # of ideas that had already simulated badly. The weakest few are shown too.
+        weak = (
+            await session.scalars(
+                select(Trial)
+                .where(*mine, Trial.state == TrialState.COMPLETE, score > FAILURE)
+                .order_by(score.asc(), Trial.number)
+                .limit(8)
+            )
+        ).all()
         # The newest of each, shown oldest first.
         waiting = (
             await session.scalars(
@@ -336,15 +346,25 @@ async def memory_of(optimizer: Optimizer, study_id: int, dataset: str) -> str:
                 .limit(5)
             )
         ).all()[::-1]
-    return memory_text(list(done), list(waiting), list(thrown))
+    best = {t.id for t in done}
+    return memory_text(
+        list(done), list(waiting), list(thrown), [t for t in weak if t.id not in best]
+    )
 
 
-def memory_text(done: list[Any], waiting: list[Any], thrown: list[Any]) -> str:
+def memory_text(
+    done: list[Any], waiting: list[Any], thrown: list[Any], weak: list[Any] | None = None
+) -> str:
     parts = []
     if done:
         parts.append(
             "Simulated, best Sharpe first:\n"
             + "\n".join(f"{float(t.values[0]):.2f} | {(t.expression or '')[:300]}" for t in done)
+        )
+    if weak:
+        parts.append(
+            "Simulated and weak, do not write variations of these:\n"
+            + "\n".join(f"{float(t.values[0]):.2f} | {(t.expression or '')[:300]}" for t in weak)
         )
     if waiting:
         parts.append(
@@ -568,6 +588,8 @@ async def _write(optimizer: Optimizer, study_id: int) -> None:
             answered = True
             items = parse_alphas(answer.text)[:40]
             entry["tokens"] = answer.total_tokens
+            if answer.truncated:
+                entry["truncated"] = True
             if not items:
                 entry["error"] = "The answer was not the JSON asked for: " + answer.text[:200]
         except BudgetExhaustedError as exc:
@@ -683,4 +705,34 @@ def parse_alphas(text: str) -> list[dict[str, Any]]:
             return [a for a in payload["alphas"] if isinstance(a, dict) and a.get("expression")]
         if isinstance(payload, list):
             return [a for a in payload if isinstance(a, dict) and a.get("expression")]
-    return []
+    return salvage_alphas(text)
+
+
+_DECODER = json.JSONDecoder()
+
+
+def salvage_alphas(text: str) -> list[dict[str, Any]]:
+    """The complete items of an answer that stopped part-way through its list.
+
+    fix: an answer cut off at the provider's output ceiling (or by a stray sentence after
+    the JSON) used to be thrown away whole, wasting a paid call that held, say, 17 good
+    Alphas before the last one broke. Each object in the list is decoded on its own and
+    decoding stops at the first one that is not whole.
+    """
+    start = text.find("[", max(text.find('"alphas"'), 0))
+    if start < 0:
+        return []
+    found: list[dict[str, Any]] = []
+    at = start + 1
+    while at < len(text):
+        while at < len(text) and text[at] in " \t\r\n,":
+            at += 1
+        if at >= len(text) or text[at] != "{":
+            break
+        try:
+            item, at = _DECODER.raw_decode(text, at)
+        except json.JSONDecodeError:
+            break
+        if isinstance(item, dict) and item.get("expression"):
+            found.append(item)
+    return found

@@ -18,8 +18,11 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger(__name__)
 
-#: Waits before sending again after a 503: an overloaded model usually clears in seconds.
+#: Waits before sending again after an overload: an overloaded model usually clears in seconds.
 OVERLOADED_WAITS = (2.0, 5.0)
+#: "Overloaded", in every provider's dialect: 503 for most, 529 for Anthropic, and the 502/504
+#: a gateway answers with when the model behind it did not.
+OVERLOADED = frozenset({502, 503, 504, 529})
 
 #: How much of a provider's error is kept. All of it that matters: whether a Google 429 is
 #: the per-minute or the per-day limit is said only in its ``details``, near the end.
@@ -37,10 +40,27 @@ class ProviderError(RuntimeError):
 class OpenAICompatible:
     """A chat-completions client for one key, on a connection pool it shares."""
 
-    def __init__(self, base_url: str, api_key: str, http: httpx2.AsyncClient) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        http: httpx2.AsyncClient,
+        *,
+        headers: dict[str, str] | None = None,
+        max_tokens: int | None = None,
+    ) -> None:
         # No SDK retries: a 429 means this key is spent for now, which rotation answers by
         # moving to the next key, and sending it again only burns the day's requests.
-        self._sdk = AsyncOpenAI(api_key=api_key, base_url=base_url, http_client=http, max_retries=0)
+        self._sdk = AsyncOpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            http_client=http,
+            max_retries=0,
+            default_headers=headers or None,
+        )
+        #: Sent only where a provider needs it: Anthropic requires an output ceiling, and
+        #: without one a batch of twenty Alphas can be cut off mid-JSON.
+        self._max_tokens = max_tokens
 
     async def generate(
         self,
@@ -64,7 +84,7 @@ class OpenAICompatible:
                     model, system, user, temperature, schema, reasoning_effort
                 )
             except ProviderError as exc:
-                if exc.status != 503:
+                if exc.status not in OVERLOADED:
                     raise
             log.info("llm.overloaded", model=model, wait=wait)
             await asyncio.sleep(wait)
@@ -95,11 +115,19 @@ class OpenAICompatible:
                 temperature=temperature if temperature is not None else omit,
                 response_format=response_format,
                 reasoning_effort=reasoning_effort if reasoning_effort is not None else omit,
+                max_tokens=self._max_tokens if self._max_tokens is not None else omit,
             )
         except APIStatusError as exc:
             raise ProviderError(exc.status_code, _detail(exc.response)) from exc
-        text = completion.choices[0].message.content if completion.choices else None
-        return text or "", completion.usage.model_dump() if completion.usage else {}
+        choice = completion.choices[0] if completion.choices else None
+        text = choice.message.content if choice else None
+        usage = completion.usage.model_dump() if completion.usage else {}
+        if choice is not None and choice.finish_reason == "length":
+            # Cut off at the output ceiling. The text is still returned, since a parser can
+            # recover the complete items, but the caller is told why the rest is missing.
+            usage["truncated"] = True
+            log.warning("llm.truncated", model=model)
+        return text or "", usage
 
     async def models(self, **query: object) -> list[str]:
         """Model ids this key can reach. Not billed against the generation quota."""
