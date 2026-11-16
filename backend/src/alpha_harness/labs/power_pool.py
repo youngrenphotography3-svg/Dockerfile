@@ -682,12 +682,19 @@ async def _seed_sweep(optimizer: Optimizer, study_id: int) -> None:
 async def _end_sweep(optimizer: Optimizer, study_id: int) -> None:
     """Keep the ``keep_top`` datasets whose sweep simulated best, and start the Regular pass.
 
+    Call only with ``optimizer.lock(study_id)`` held, as ``refill`` does.
+
     A dataset is ranked by the mean of its best three scores (see ``rank_datasets``), and the
     ``keep_extra`` next ones are kept as a reserve. When none scored, every dataset is kept
     rather than ending the task on a sweep that proved nothing.
     """
     score = func.json_extract(Trial.values, "$[0]")
-    async with optimizer.lock(study_id), optimizer.db.session() as session:
+    # No ``optimizer.lock(study_id)`` here: the only caller is ``refill``, which runs inside
+    # ``Optimizer.advance`` and already holds that lock. asyncio.Lock is not re-entrant, so
+    # taking it again deadlocked the task for good once its sweep finished: the optimizer
+    # loop froze (no task anywhere advanced, every core sat idle) and Stop on that task
+    # waited on the lock forever.
+    async with optimizer.db.session() as session:
         stored = await session.get(Study, study_id)
         if stored is None:
             return
