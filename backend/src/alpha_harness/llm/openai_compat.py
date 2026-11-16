@@ -8,7 +8,7 @@ import asyncio
 from typing import TYPE_CHECKING, Any
 
 import structlog
-from openai import APIStatusError, AsyncOpenAI, omit
+from openai import APIStatusError, AsyncOpenAI, Omit, omit
 
 if TYPE_CHECKING:
     import httpx2
@@ -48,6 +48,7 @@ class OpenAICompatible:
         *,
         headers: dict[str, str] | None = None,
         max_tokens: int | None = None,
+        send_response_format: bool = True,
     ) -> None:
         # No SDK retries: a 429 means this key is spent for now, which rotation answers by
         # moving to the next key, and sending it again only burns the day's requests.
@@ -61,6 +62,9 @@ class OpenAICompatible:
         #: Sent only where a provider needs it: Anthropic requires an output ceiling, and
         #: without one a batch of twenty Alphas can be cut off mid-JSON.
         self._max_tokens = max_tokens
+        #: False for a provider that rejects ``response_format`` (Anthropic accepts only
+        #: ``json_schema`` and answers 400 to ``json_object``); the prompt asks for JSON.
+        self._send_response_format = send_response_format
 
     async def generate(
         self,
@@ -103,11 +107,16 @@ class OpenAICompatible:
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ]
-        response_format: ResponseFormat = (
-            {"type": "json_schema", "json_schema": {"name": "answer", "schema": schema}}
-            if schema is not None
-            else {"type": "json_object"}
-        )
+        response_format: ResponseFormat | Omit
+        if not self._send_response_format:
+            response_format = omit
+        elif schema is not None:
+            response_format = {
+                "type": "json_schema",
+                "json_schema": {"name": "answer", "schema": schema},
+            }
+        else:
+            response_format = {"type": "json_object"}
         try:
             completion = await self._sdk.chat.completions.create(
                 model=model,

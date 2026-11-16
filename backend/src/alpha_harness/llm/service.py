@@ -185,6 +185,7 @@ class LLMService:
             self._http,
             headers=spec.headers_for(secret),
             max_tokens=spec.max_tokens,
+            send_response_format=spec.send_response_format,
         )
 
     def _model(self, ref: str | None) -> ModelInfo:
