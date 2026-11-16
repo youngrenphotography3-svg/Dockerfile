@@ -85,3 +85,10 @@ def test_a_cut_off_answer_keeps_its_complete_alphas() -> None:
 def test_prose_around_the_json_does_not_lose_it() -> None:
     text = 'Sure! {"alphas": [{"expression": "rank(a)"}]} Let me know.'
     assert pp.parse_alphas(text) == [{"expression": "rank(a)"}]
+
+
+def test_anthropic_sends_no_response_format() -> None:
+    from alpha_harness.llm.providers import PROVIDERS
+
+    assert PROVIDERS["anthropic"].send_response_format is False
+    assert PROVIDERS["openai"].send_response_format is True

@@ -48,6 +48,8 @@ class Provider:
     headers: dict[str, str] = field(default_factory=dict)
     #: An output ceiling to send, for a provider that requires one or cuts answers short.
     max_tokens: int | None = None
+    #: False where ``response_format`` is rejected rather than ignored.
+    send_response_format: bool = True
 
     def headers_for(self, key: str) -> dict[str, str]:
         return {name: value.replace("{key}", key) for name, value in self.headers.items()}
@@ -185,6 +187,9 @@ PROVIDERS: dict[str, Provider] = {
         # The Messages API behind the compatibility layer needs a ceiling; twenty Alphas in
         # JSON run to a few thousand tokens, and a cut-off answer is a whole call wasted.
         max_tokens=16_000,
+        # Its endpoint now answers 400 "response_format.type: Input should be 'json_schema'"
+        # to ``json_object``, so none is sent; the prompt asks for JSON.
+        send_response_format=False,
     ),
 }
 
