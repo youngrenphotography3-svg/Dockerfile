@@ -48,6 +48,9 @@ class Provider:
     headers: dict[str, str] = field(default_factory=dict)
     #: An output ceiling to send, for a provider that requires one or cuts answers short.
     max_tokens: int | None = None
+    #: False where ``response_format: json_object`` is rejected (Anthropic accepts only
+    #: ``json_schema``); the prompt alone then asks for JSON.
+    json_object: bool = True
 
     def headers_for(self, key: str) -> dict[str, str]:
         return {name: value.replace("{key}", key) for name, value in self.headers.items()}
@@ -185,6 +188,7 @@ PROVIDERS: dict[str, Provider] = {
         # The Messages API behind the compatibility layer needs a ceiling; twenty Alphas in
         # JSON run to a few thousand tokens, and a cut-off answer is a whole call wasted.
         max_tokens=16_000,
+        json_object=False,
     ),
 }
 
