@@ -24,6 +24,7 @@ from .catalog.sync import CatalogSync, serialise_run
 from .config import BRAIN_API_BASE, Settings
 from .db.duck import Catalog
 from .db.models import SimStatus, SimulationRecord, utcnow
+from .db.reclaim import reclaim
 from .db.sqlite import Database, snapshot
 from .engine.slots import BatchEngine
 from .engine.tracker import SimulationTracker
@@ -125,6 +126,12 @@ class AppState:
     # -- lifecycle -------------------------------------------------------
 
     async def startup(self) -> None:
+        # Before either database opens: give their slack back to the disk, so a small volume
+        # does not fill up. A second backend fails to open the catalog here, logged, and
+        # then fails for real at ``catalog.open`` below, exactly as before.
+        await asyncio.to_thread(
+            reclaim, self.settings.data_dir, self.settings.sqlite_path, self.settings.duckdb_path
+        )
         # The catalog's single-writer lock is this process's claim on the data directory, so it
         # comes first: a second backend must fail here, before it backs up or migrates.
         await self.catalog.open()
