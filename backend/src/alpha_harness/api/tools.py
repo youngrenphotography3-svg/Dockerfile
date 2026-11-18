@@ -32,11 +32,12 @@ from ..labs.params import (
     LegGateParams,
     SettingsParams,
 )
-from ..schemas import Out
+from ..schemas import Out, camel_dict
 from ..tools import (
     base_payment,
     correlation_breaker,
     leg_gate,
+    pyramid_planner,
     settings_sampler,
     submission_planner,
     submit_advisor,
@@ -547,9 +548,11 @@ async def _advice(state: State) -> tuple[list[AdvisedAlpha], dict[str, Any]]:
     submitted = await _submitted_rows(state)
     locked = sorted(marked | {str(r["alpha_id"]) for r in submitted})
     candidates = [r for r in rows.values() if not r.get("submitted")]
-    days = await state.alphas.daily_pnl(
-        list(dict.fromkeys([*(str(r["alphaId"]) for r in candidates), *locked]))
-    )
+    wanted = list(dict.fromkeys([*(str(r["alphaId"]) for r in candidates), *locked]))
+    days = await state.alphas.daily_pnl(wanted)
+    # Without a series an Alpha's overlap with the book is unchecked, and that one reads as
+    # distinct by default. Fetch what is missing so the next read can de-duplicate it.
+    state.backfill.schedule_returns([a for a in wanted if a not in days])
 
     now = datetime.now(UTC)
     shares = base_payment.context(submitted, now)
@@ -616,6 +619,65 @@ async def advise_submissions(state: State) -> SubmitAdvice:
 
 
 # --- Base Payment ------------------------------------------------------------
+
+
+class PyramidPlanRow(Out):
+    region: str
+    delay: int
+    category_id: str
+    category: str
+    #: Alphas submitted in it this quarter, as BRAIN counts them.
+    alpha_count: int
+    #: Submissions still needed before it counts as formulated.
+    gap: int
+    multiplier: float | None
+    #: Vault Alphas in it, and how many of those nothing BRAIN reported refuses.
+    tried: int
+    clean: int
+    hit_rate: float
+    priority: float
+
+
+class PyramidPlan(Out):
+    quarter: dict[str, str]
+    alphas_per_pyramid: int
+    rows: list[PyramidPlanRow]
+
+
+@router.get("/pyramid-planner")
+async def plan_pyramids(
+    state: State,
+    regions: str | None = None,
+    categories: str | None = None,
+    include_lit: bool = False,
+) -> PyramidPlan:
+    """Which pyramids to research next: short of three submissions, high multiplier, and a
+    history of clean Alphas. ``regions`` and ``categories`` are comma-separated filters, e.g.
+    ``categories=fundamental,analyst``. Read-only: two cached BRAIN reads and the vault."""
+    grid = await pyramid_grid(state.endpoints, state.alphas.catalog)
+    rows = await state.alphas.catalog.query(
+        "SELECT a.pyramids, a.checks, a.simulation_mode FROM alpha a "
+        "WHERE a.pyramids IS NOT NULL AND a.checks IS NOT NULL"
+    )
+
+    def split(text: str | None) -> set[str] | None:
+        found = {part.strip() for part in (text or "").split(",") if part.strip()}
+        return found or None
+
+    planned = await asyncio.to_thread(
+        lambda: pyramid_planner.plan(
+            grid,
+            pyramid_planner.tally(rows),
+            regions=split(regions),
+            categories=split(categories),
+            include_lit=include_lit,
+        )
+    )
+    return PyramidPlan(
+        quarter=grid.get("quarter") or {},
+        alphas_per_pyramid=int(grid.get("alphasPerPyramid") or 0),
+        rows=[PyramidPlanRow.model_validate(camel_dict(p)) for p in planned],
+    )
 
 
 @router.get("/base-payment")

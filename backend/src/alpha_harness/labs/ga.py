@@ -71,10 +71,20 @@ if TYPE_CHECKING:  # pragma: no cover
 
 log = structlog.get_logger(__name__)
 
-#: The economic windows from the research notes, a week to a year.
-WINDOWS = (5, 10, 21, 42, 63, 126, 252)
+#: The economic windows from the research notes, a week to two years. Two years because slow
+#: fundamental and analyst families read their own history over 252-600 days; snapping them
+#: to a year at most rewrote the idea rather than tuning it.
+WINDOWS = (5, 10, 21, 42, 63, 126, 252, 504)
+#: Decays a mutation may move to. Fast families run at 0-4 and fundamentals at 10-300
+#: (``labs/playbook.py``); the Search Lab's 0-10 set dragged every slow seed fast.
+DECAYS = (0, 2, 4, 6, 8, 10, 15, 20, 30, 60, 120)
+#: Fields a mutation may swap in must cover at least this share of the universe. A sparse
+#: field puts the book on a few names: concentrated weight and a weak sub-universe.
+MIN_SWAP_COVERAGE = 0.6
 ARITHMETIC = ("+", "-", "*", "/")
 MUTATION_RATE = 0.05
+#: Scored Alphas a task waits for before breeding from them, unless nothing more is coming.
+MIN_BREEDING_POOL = 20
 #: Children spent without a new best before a task stops early, from the research notes.
 PATIENCE = 1_000
 #: Candidates Auto Select examines at most, so a weak market cannot cost hundreds of downloads.
@@ -273,7 +283,10 @@ def build_market(
     dataset_of = {
         str(f["field_id"]): str(f["dataset_id"])
         for f in fields
-        if f.get("field_type") == "MATRIX" and f.get("dataset_id")
+        if f.get("field_type") == "MATRIX"
+        and f.get("dataset_id")
+        # Unknown coverage stays swappable: older catalogs did not store it.
+        and (f.get("coverage") is None or float(f["coverage"]) >= MIN_SWAP_COVERAGE)
     }
     by_dataset: dict[str, list[str]] = defaultdict(list)
     for field_id, dataset in dataset_of.items():
@@ -304,7 +317,7 @@ async def market_for(
     key = (region, delay, universe, tuple(neutralizations), len(operators))
     if key not in _markets:
         fields = await catalog.query(
-            "SELECT field_id, dataset_id, field_type FROM data_field "
+            "SELECT field_id, dataset_id, field_type, coverage FROM data_field "
             "WHERE instrument_type = 'EQUITY' AND region = ? AND delay = ? AND universe = ?",
             [region, delay, universe],
         )
@@ -374,13 +387,17 @@ def uniform(rng: random.Random, a: Node, b: Node, genes: list[tuple[Path, str]])
     return child
 
 
+def _neighbour(rng: random.Random, steps: tuple[int, ...], current: int) -> int:
+    """One step along ``steps`` from ``current``; off the ladder, its nearest rung."""
+    if current not in steps:
+        return min(steps, key=lambda w: abs(w - current))
+    at = steps.index(current)
+    return rng.choice([steps[i] for i in (at - 1, at + 1) if 0 <= i < len(steps)])
+
+
 def _mutated(rng: random.Random, node: Node, kind: str, market: Market) -> str:
     if kind == "window":
-        current = int(node.value)
-        if current not in WINDOWS:
-            return str(min(WINDOWS, key=lambda w: abs(w - current)))
-        at = WINDOWS.index(current)
-        return str(rng.choice([WINDOWS[i] for i in (at - 1, at + 1) if 0 <= i < len(WINDOWS)]))
+        return str(_neighbour(rng, WINDOWS, int(node.value)))
     if kind == "field":
         dataset = market.dataset_of[node.value]
         return rng.choice([f for f in market.by_dataset[dataset] if f != node.value])
@@ -414,7 +431,7 @@ def mutate(
             current = settings["neutralization"]
             settings[kind] = rng.choice([n for n in market.neutralizations if n != current])
         elif kind == "decay":
-            settings[kind] = rng.choice([d for d in search.DECAYS if d != settings["decay"]])
+            settings[kind] = _neighbour(rng, DECAYS, int(settings["decay"]))
         else:
             node = node_at(tree, path)
             tree = replace_at(tree, path, replace(node, value=_mutated(rng, node, kind, market)))
@@ -481,6 +498,9 @@ def ga_key(expression: str | None, settings: dict[str, Any] | None) -> tuple[str
 
 #: Two Alphas moving together at |correlation| of this or more are one idea, not two.
 DEFAULT_MAX_CORRELATION = 0.5
+#: Against what is already submitted the bar is BRAIN's own self-correlation ceiling: a parent
+#: past it breeds children BRAIN refuses, one below it can still breed distinct ones.
+BOOK_MAX_CORRELATION = 0.7
 
 
 @dataclass(frozen=True, slots=True)
@@ -548,16 +568,32 @@ def independent(
     series: dict[str, Profile | None],
     limit: int,
     threshold: float = DEFAULT_MAX_CORRELATION,
+    *,
+    book: dict[str, Profile] | None = None,
+    book_threshold: float = BOOK_MAX_CORRELATION,
+    keep_unknown: bool = True,
 ) -> list[str]:
     """The notes' between-correlation selection: best first, each kept unless it moves with
-    one already kept. An Alpha without a usable series counts as independent."""
+    one already kept or with an Alpha of ``book`` (already submitted, so never chosen again).
+
+    An Alpha without a usable series is kept only with ``keep_unknown``. A search breeding
+    inside one task may explore with it; anything shown as a pick to submit must not, since a
+    correlation that was never measured is not a correlation that was found low. Only 5.6% of
+    one vault's Alphas had a series (audit, 2026-11-18), so the default once let near-copies
+    through as "independent".
+    """
     kept: list[str] = []
     kept_series: dict[str, Profile] = {}
     for alpha_id in order:
         if len(kept) >= limit:
             break
         own = series.get(alpha_id)
-        if own is not None:
+        if own is None:
+            if not keep_unknown:
+                continue
+        else:
+            if book and collision(own, book, book_threshold):
+                continue
             if collision(own, kept_series, threshold):
                 continue
             kept_series[alpha_id] = own
@@ -565,7 +601,9 @@ def independent(
     return kept
 
 
-async def _parents(optimizer: Optimizer, ranked: list[Trial], limit: int) -> list[Trial]:
+async def _parents(
+    optimizer: Optimizer, ranked: list[Trial], limit: int, run: EvolutionParams | None = None
+) -> list[Trial]:
     """The ranked trials kept apart by daily PnL. Missing PnL downloads in the background.
 
     A region-agnostic result has no series of its own; each scored region's child stands in.
@@ -578,8 +616,44 @@ async def _parents(optimizer: Optimizer, ranked: list[Trial], limit: int) -> lis
     if missing and optimizer.backfill is not None:
         optimizer.backfill.schedule_returns(missing)
     series = {a: profile_of(regions, days) for a, regions in where.items()}
-    kept = set(await asyncio.to_thread(independent, ids, series, limit))
+    book = await _book(optimizer, run) if run is not None else {}
+    kept = set(await asyncio.to_thread(lambda: independent(ids, series, limit, book=book)))
     return [t for t in ranked if t.alpha_id in kept]
+
+
+#: Submitted Alphas of one market whose train PnL the parents are kept apart from, at most.
+BOOK_LIMIT = 400
+
+
+async def _book(optimizer: Optimizer, run: EvolutionParams) -> dict[str, Profile]:
+    """The submitted Alphas of the task's market, as profiles parents must not move with.
+
+    Breeding next to what is already submitted spends simulations on children BRAIN refuses
+    for self-correlation. Missing series are downloaded in the background for next time.
+    """
+    try:
+        rows = await optimizer.alphas.catalog.query(
+            f"SELECT a.alpha_id FROM alpha a WHERE {SUBMITTED} "  # noqa: S608 - constant
+            "AND a.region = ? AND a.delay = ? AND a.universe = ? "
+            "ORDER BY a.date_submitted DESC NULLS LAST LIMIT ?",
+            [run.region, run.delay, run.universe, BOOK_LIMIT],
+        )
+    except Exception:
+        log.warning("ga.book_failed", exc_info=True)
+        return {}
+    ids = [str(r["alpha_id"]) for r in rows]
+    if not ids or run.region == REGION_AGNOSTIC_REGION:
+        return {}
+    days = await optimizer.alphas.train_pnl(ids)
+    missing = [a for a in ids if a not in days]
+    if missing and optimizer.backfill is not None:
+        optimizer.backfill.schedule_returns(missing)
+    # Keyed by the market's region, as ``region_series`` keys a one-market Alpha's profile.
+    return {
+        f"book:{a}": {run.region: s}
+        for a in ids
+        if a in days and (s := series_of(days[a])) is not None
+    }
 
 
 async def breed(
@@ -620,6 +694,12 @@ async def breed(
         bred = await session.scalar(
             select(func.count()).where(Trial.study_id == row.id, Trial.generation > 0)
         )
+        in_flight = await session.scalar(
+            select(func.count()).where(
+                Trial.study_id == row.id,
+                Trial.state.in_([TrialState.QUEUED, TrialState.RUNNING]),
+            )
+        )
         identities = (
             await session.execute(
                 select(Trial.expression, type_coerce(Trial.settings, String)).where(
@@ -627,7 +707,12 @@ async def breed(
                 )
             )
         ).all()
-    chosen = await _parents(optimizer, ranked, population // 2)
+    # fix: one task bred generations 1 to 5 in 100 seconds, each from the 10-40 results back
+    # so far -- selection on noise. Wait for a fuller pool while more results are on the way;
+    # with nothing in flight, breed from what there is rather than stall.
+    if len(ranked) < min(population, MIN_BREEDING_POOL) and in_flight:
+        return []
+    chosen = await _parents(optimizer, ranked, population // 2, run)
     parents = [p for t in chosen if (p := Parent.of(t.alpha_id, t.expression, t.settings or {}))]
     if not parents:
         return []
