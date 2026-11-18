@@ -521,6 +521,7 @@ def validate(
             count = len(node.args)
             if count < info.required or (info.maximum is not None and count > info.maximum):
                 problems.append(f"{node.value} does not take {count} inputs.")
+            problems.extend(_window_problems(node, info))
         elif (
             node.kind == "name"
             # A keyword value names an option (``driver=gaussian``), not a data field.
@@ -530,4 +531,70 @@ def validate(
             and node.value.lower() not in ("true", "false", "nan")
         ):
             problems.append(f"{node.value} is not a data field here.")
+    problems.extend(_unused_assignments(tree))
+    return problems
+
+
+#: Inputs BRAIN requires to be a positive whole number of days, by the name the operator's
+#: definition gives them. Written as ``0``, ``0.2`` or ``-5`` BRAIN refuses the whole
+#: simulation ("Got invalid value ... for attribute lookback, should be a positive integer"):
+#: 21 of one LLM lab's failures (audit, 2026-11-18).
+WINDOW_PARAMS = frozenset({"d", "lookback"})
+
+
+def _window_problems(node: Node, info: OperatorInfo) -> list[str]:
+    names = [p.split("=")[0].strip() for p in info.params]
+    given = [
+        *((names[i], arg) for i, arg in enumerate(node.args) if i < len(names)),
+        *node.kwargs,
+    ]
+    return [
+        f"{node.value}: {name} must be a positive whole number of days, not {_literal(arg)}."
+        for name, arg in given
+        if name in WINDOW_PARAMS and not _positive_whole(arg)
+    ]
+
+
+def _positive_whole(arg: Node) -> bool:
+    """True unless ``arg`` is a number literal that is not a positive integer.
+
+    Anything else (a ``$variable`` a template has not filled yet, a name) is left to the rest
+    of validation: only a written number can be judged here.
+    """
+    if arg.kind == "unary" and arg.value == "-" and arg.args and arg.args[0].kind == "num":
+        return False
+    if arg.kind != "num":
+        return True
+    try:
+        number = float(arg.value)
+    except ValueError:
+        return True
+    return number > 0 and number.is_integer()
+
+
+def _literal(arg: Node) -> str:
+    if arg.kind == "unary" and arg.args:
+        return f"-{arg.args[0].value}"
+    return arg.value or arg.kind
+
+
+def _unused_assignments(tree: Node) -> list[str]:
+    """Statements whose name nothing later reads. BRAIN refuses an expression that reads a
+    field or operator it then throws away ("Found unused data fields", "Found unused
+    operators"), so an unused ``x = ...;`` costs a whole simulation."""
+    if tree.kind != "seq":
+        return []
+    statements = list(tree.args)
+    problems: list[str] = []
+    for index, statement in enumerate(statements[:-1]):
+        if statement.kind != "assign":
+            continue
+        later = statements[index + 1 :]
+        read = any(
+            n.kind == "name" and n.value == statement.value
+            for later_statement in later
+            for _, n in walk(later_statement)
+        )
+        if not read:
+            problems.append(f"{statement.value} is assigned but never used.")
     return problems

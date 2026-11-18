@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..brain.schemas import QUICK_MODE, Alpha, Check, CheckResult, SampleStats
-from ..vault.yields import without_quota_checks
+from ..vault.yields import ladder_floor, without_quota_checks
 
 #: A missing number scores this: deliberately terrible, so a broken trial is never mistaken
 #: for a good one. Every objective is maximised.
@@ -136,7 +136,27 @@ def constraints(alpha: Alpha) -> tuple[dict[str, float], list[dict[str, Any]]]:
             }
         )
 
+    # The sampler's constraint only, never a row in ``detail``: ``detail`` is read as BRAIN's own
+    # checks downstream, and a check BRAIN did not run must not refuse an Alpha on the Tasks list.
+    if (ladder := ladder_proxy(alpha)) is not None:
+        violations[LADDER_PROXY] = ladder
     return violations, detail
+
+
+#: Not a BRAIN check: the IS Ladder's first iteration read off the held-out test years.
+#: ``IS_LADDER_SHARPE`` itself stays ``PENDING`` until the Alpha is checked, which this module
+#: reads as feasible, so without it a search never learns which of its Alphas the ladder
+#: will refuse. The test period is the ladder's most recent two years, so a test Sharpe under
+#: the ladder's FAIL_THRESHOLD is a certain refusal.
+LADDER_PROXY = "LADDER_2Y_PROXY"
+
+
+def ladder_proxy(alpha: Alpha) -> float | None:
+    """How far the test-years Sharpe falls short of the ladder's floor; ``None`` untested."""
+    if alpha.test is None or alpha.test.sharpe is None or not math.isfinite(alpha.test.sharpe):
+        return None
+    floor = ladder_floor(alpha.settings.delay if alpha.settings else None)
+    return max(0.0, floor - float(alpha.test.sharpe))
 
 
 def _violation(check: Check) -> float:

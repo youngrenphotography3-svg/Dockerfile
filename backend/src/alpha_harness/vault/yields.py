@@ -43,13 +43,14 @@ QUOTA_CHECKS = frozenset({"REGULAR_SUBMISSION", "D0_SUBMISSION"})
 #: Checks that label an alpha rather than gate it. The platform reports these as ``WARNING``
 #: on every alpha checked, passing or failing, so judging them would make nothing submittable.
 #:
-#: ``PROD_CORRELATION`` gates nothing a consultant is kept from submitting, so it is excused
-#: too. ``SELF_CORRELATION`` is deliberately *not* here: an alpha too close to the pool
-#: genuinely cannot be submitted, and excusing it would hide the signal that should
-#: reallocate cores.
+#: ``SELF_CORRELATION`` and ``PROD_CORRELATION`` are deliberately *not* here. The consultant
+#: rules make production correlation a submission test (below 0.7, or a Sharpe 10% above
+#: every Alpha it collides with), and BRAIN's ``FAIL`` result already applies that exception.
+#: Excusing it let 15 of 19 "submittable" Alphas in one vault be ones BRAIN refuses (audit,
+#: 2026-11-18). A raw correlation of 0.7 or more is not a refusal by itself: 51 of 286
+#: submitted Alphas carried one, so only the check's result gates, never the value.
 IGNORED_CHECKS = frozenset(
     {
-        "PROD_CORRELATION",
         "MATCHES_COMPETITION",
         "MATCHES_PYRAMID",
         "MATCHES_THEMES",
@@ -236,6 +237,9 @@ async def submittable(
         {a: {"": pnl} for a in order if a in days and (pnl := series_of(days[a]))},
         SHORTLIST,
         SHORTLIST_MAX_CORRELATION,
+        # A pick to submit must have been measured: its series is downloaded in the background
+        # (``pnlMissing``) and it is shortlisted on the next read.
+        keep_unknown=False,
     )
     by_id = {str(r["alpha_id"]): r for r in ready}
     # Everything the de-correlation walked past before the shortlist filled up.
@@ -328,6 +332,8 @@ FIXABLE_CHECKS = frozenset(
         "CONCENTRATED_WEIGHT",
         "LOW_SUB_UNIVERSE_SHARPE",
         "SELF_CORRELATION",
+        # The Correlation Breaker exists for exactly this: same signal, re-shaped exposure.
+        "PROD_CORRELATION",
     }
 )
 
@@ -428,15 +434,26 @@ SHORTLIST = 5
 SHORTLIST_MAX_CORRELATION = 0.7
 #: The test-years Sharpe must keep at least this share of the train-years Sharpe.
 HELD_OUT_KEEP = 0.5
+#: The IS Ladder's FAIL_THRESHOLD by delay. Its first iteration is the most recent two years,
+#: which is the test period every request holds out (``TEST_PERIOD``): a test Sharpe below
+#: this fails the ladder at once, whatever the rest of the history did.
+LADDER_FAIL = {0: 2.69, 1: 1.59}
+
+
+def ladder_floor(delay: Any) -> float:
+    """The ladder's first-iteration floor for this delay; Delay 1 when unknown."""
+    return LADDER_FAIL[0] if delay == 0 else LADDER_FAIL[1]
 
 
 def held_out_ok(row: dict[str, Any]) -> bool:
     """Whether an Alpha held up in the test years its search never saw.
 
-    False when there is no test Sharpe: an Alpha that was never tested has not held up.
+    False when there is no test Sharpe: an Alpha that was never tested has not held up. It
+    must also clear the ladder's first iteration, since keeping half of a train Sharpe of 2.4
+    is a test Sharpe of 1.2, which BRAIN's IS Ladder fails outright.
     """
     test, train = row.get("test_sharpe"), row.get("train_sharpe")
-    if test is None or test <= 0:
+    if test is None or test <= 0 or test < ladder_floor(row.get("delay")):
         return False
     return train is None or test >= HELD_OUT_KEEP * train
 

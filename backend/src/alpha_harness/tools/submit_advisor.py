@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 
+from ..labs.playbook import REGIONS
 from .submission_planner import correlations, grid, window_start
 
 if TYPE_CHECKING:
@@ -185,9 +186,17 @@ def _within_bars(alpha: dict[str, Any]) -> list[str]:
         problems.append(f"Sharpe is under the {SHARPE_BAR[delay]:.2f} bar")
     if fitness is None or fitness < FITNESS_BAR[delay]:
         problems.append(f"Fitness is under the {FITNESS_BAR[delay]:.2f} bar")
-    if turnover is None or not TURNOVER_RANGE[0] <= turnover <= TURNOVER_RANGE[1]:
-        problems.append("Turnover is outside 1%-70%")
+    ceiling = max_turnover(alpha)
+    if turnover is None or not TURNOVER_RANGE[0] <= turnover <= ceiling:
+        problems.append(f"Turnover is outside 1%-{ceiling:.0%}")
     return problems
+
+
+def max_turnover(alpha: dict[str, Any]) -> float:
+    """The region's turnover cap: 40% in IND, 30% in KOR and HKG, else 70%."""
+    region = str((alpha.get("settings") or {}).get("region") or "").upper()
+    cap = REGIONS[region].max_turnover if region in REGIONS else TURNOVER_RANGE[1]
+    return min(cap, TURNOVER_RANGE[1])
 
 
 def advise(

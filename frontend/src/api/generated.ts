@@ -2039,6 +2039,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/tools/pyramid-planner": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Plan Pyramids
+         * @description Which pyramids to research next: short of three submissions, high multiplier, and a
+         *     history of clean Alphas. ``regions`` and ``categories`` are comma-separated filters, e.g.
+         *     ``categories=fundamental,analyst``. Read-only: two cached BRAIN reads and the vault.
+         */
+        get: operations["plan_pyramids_api_tools_pyramid_planner_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/tools/settings-sampler/preview": {
         parameters: {
             query?: never;
@@ -4647,6 +4669,42 @@ export interface components {
             /** Columns */
             columns: components["schemas"]["PyramidColumn"][];
             quarter: components["schemas"]["Quarter"];
+        };
+        /** PyramidPlan */
+        PyramidPlan: {
+            /** Alphasperpyramid */
+            alphasPerPyramid: number;
+            /** Quarter */
+            quarter: {
+                [key: string]: string;
+            };
+            /** Rows */
+            rows: components["schemas"]["PyramidPlanRow"][];
+        };
+        /** PyramidPlanRow */
+        PyramidPlanRow: {
+            /** Alphacount */
+            alphaCount: number;
+            /** Category */
+            category: string;
+            /** Categoryid */
+            categoryId: string;
+            /** Clean */
+            clean: number;
+            /** Delay */
+            delay: number;
+            /** Gap */
+            gap: number;
+            /** Hitrate */
+            hitRate: number;
+            /** Multiplier */
+            multiplier: number | null;
+            /** Priority */
+            priority: number;
+            /** Region */
+            region: string;
+            /** Tried */
+            tried: number;
         };
         /**
          * Quarter
@@ -9188,6 +9246,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AddedTask"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    plan_pyramids_api_tools_pyramid_planner_get: {
+        parameters: {
+            query?: {
+                regions?: string | null;
+                categories?: string | null;
+                include_lit?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PyramidPlan"];
                 };
             };
             /** @description Validation Error */

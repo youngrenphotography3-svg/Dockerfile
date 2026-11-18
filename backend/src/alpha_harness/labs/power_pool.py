@@ -425,25 +425,67 @@ async def memory_of(optimizer: Optimizer, study_id: int, dataset: str) -> str:
                 .limit(5)
             )
         ).all()[::-1]
+        errored = (
+            await session.scalars(
+                select(Trial)
+                .where(
+                    *mine,
+                    Trial.state == TrialState.FAIL,
+                    Trial.message.is_not(None),
+                    func.json_extract(Trial.params, "$.rejected").is_(None),
+                )
+                .order_by(Trial.number.desc())
+                .limit(6)
+            )
+        ).all()[::-1]
     best = {t.id for t in done}
     return memory_text(
-        list(done), list(waiting), list(thrown), [t for t in weak if t.id not in best]
+        list(done),
+        list(waiting),
+        list(thrown),
+        [t for t in weak if t.id not in best],
+        list(errored),
     )
 
 
+def _fails(trial: Any) -> str:
+    """The checks a finished Alpha missed, from its stored constraint, e.g. ``LOW_FITNESS``."""
+    constraint = getattr(trial, "constraint", None) or {}
+    missed = sorted(str(k).split("#")[0] for k, v in constraint.items() if float(v or 0) > 0)
+    return ",".join(missed) or "-"
+
+
+def _memory_line(trial: Any) -> str:
+    score = float(trial.values[0])
+    return f"{score:.2f} | fails: {_fails(trial)} | {(trial.expression or '')[:300]}"
+
+
 def memory_text(
-    done: list[Any], waiting: list[Any], thrown: list[Any], weak: list[Any] | None = None
+    done: list[Any],
+    waiting: list[Any],
+    thrown: list[Any],
+    weak: list[Any] | None = None,
+    errored: list[Any] | None = None,
 ) -> str:
     parts = []
     if done:
         parts.append(
-            "Simulated, best Sharpe first:\n"
-            + "\n".join(f"{float(t.values[0]):.2f} | {(t.expression or '')[:300]}" for t in done)
+            "Simulated, best score first, with the BRAIN checks each one failed:\n"
+            + "\n".join(_memory_line(t) for t in done)
         )
     if weak:
         parts.append(
             "Simulated and weak, do not write variations of these:\n"
-            + "\n".join(f"{float(t.values[0]):.2f} | {(t.expression or '')[:300]}" for t in weak)
+            + "\n".join(_memory_line(t) for t in weak)
+        )
+    if errored:
+        # fix: 27% of one task's simulations failed on errors the model kept repeating
+        # (lookback 0, unused fields); it was never shown BRAIN's own message.
+        parts.append(
+            "Refused by BRAIN before it ran, never repeat these mistakes:\n"
+            + "\n".join(
+                f"{(t.expression or '')[:300]} | {(t.message or '')[:160]}" for t in errored
+            )
         )
     if waiting:
         parts.append(

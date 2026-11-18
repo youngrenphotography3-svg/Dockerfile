@@ -31,6 +31,7 @@ from .params import (
     TASK_SAMPLERS,
     TEMPLATE_SAMPLER,
 )
+from .truncation import MULTI_COUNTRY
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -51,7 +52,9 @@ _TASKS: dict[str, tuple[str, str]] = {
     SEARCH_SAMPLER: ("search", "train_sharpe"),
     TEMPLATE_SAMPLER: ("template", "train_sharpe"),
     GA_SAMPLER: ("evolution", "train_fitness"),
-    POWER_POOL_SAMPLER: ("power-pool", "sharpe"),
+    # Train years only, like Search and Template: the LLM is shown each Alpha's score and
+    # writes the next from it, so a full-period Sharpe would feed it the held-out years.
+    POWER_POOL_SAMPLER: ("power-pool", "train_sharpe"),
     SETTINGS_SAMPLER: ("settings-sampler", "sharpe"),
     CORRELATION_BREAKER: ("correlation-breaker", "sharpe"),
     LEG_GATE: ("leg-gate", "sharpe"),
@@ -139,7 +142,12 @@ async def neutralizations_for(
     offered = choices(legal_choices(schema, region, delay), "neutralization")
     if chosen and (picked := [n for n in offered if n in set(chosen)]):
         return picked
-    return [n for n in search.NEUTRALIZATIONS if n in offered] or offered[:1]
+    default = [n for n in search.NEUTRALIZATIONS if n in offered]
+    # Multi-country markets neutralize by country before anything else (their region guides,
+    # ``labs.playbook``); the four group defaults leave the country factor in the book.
+    if region.upper() in MULTI_COUNTRY and "COUNTRY" in offered:
+        default = ["COUNTRY", *default]
+    return default or offered[:1]
 
 
 async def synced_universes(
