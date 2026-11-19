@@ -233,6 +233,11 @@ function AlphaCard({ alpha: a, recheck }: { alpha: AdvisedAlpha; recheck?: boole
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-hairline-subtle pb-2">
         <div className="flex items-center gap-2">
           {a.rank > 0 && <Badge tone="profit">#{a.rank}</Badge>}
+          {a.themeMultiplier != null && (
+            <Badge tone="profit" title="BRAIN's MATCHES_THEMES check passed">
+              Theme {fmt.ratio(a.themeMultiplier)}x
+            </Badge>
+          )}
           <button
             type="button"
             className="num font-semibold text-body text-ink transition-colors hover:text-link hover:underline"

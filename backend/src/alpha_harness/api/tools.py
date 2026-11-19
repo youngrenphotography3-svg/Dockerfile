@@ -475,6 +475,9 @@ class AdvisedAlpha(Out):
     prod_correlation: float | None
     #: Pyramid multiplier on BRAIN's Quality Factor for this Alpha's data category, if known.
     multiplier: float | None = None
+    #: The matched themes' combined multiplier when BRAIN's ``MATCHES_THEMES`` check passed;
+    #: null when it matches no active theme or has not been judged.
+    theme_multiplier: float | None = None
 
 
 class SubmitAdvice(Out):
@@ -497,12 +500,13 @@ async def _submitted_rows(state: State) -> list[dict[str, Any]]:
     sql = (
         "SELECT a.alpha_id, a.sim_type, a.region, a.delay, a.universe, a.neutralization, "  # noqa: S608
         "a.sharpe, a.turnover, a.margin, a.status, a.date_submitted, a.pyramids, "
-        "a.prod_correlation, a.self_correlation "
+        "a.prod_correlation, a.self_correlation, a.checks "
         f"FROM alpha a WHERE {SUBMITTED}"
     )
     rows = await state.alphas.catalog.query(sql)
     for row in rows:
         row["pyramids"] = json_list(row.get("pyramids"))
+        row["theme"] = base_payment.theme_multiplier(checks_of(row.pop("checks", None)))
     return rows
 
 
@@ -561,16 +565,19 @@ async def _advice(state: State) -> tuple[list[AdvisedAlpha], dict[str, Any]]:
     stored = await state.alphas.by_ids(ids) if ids else {}
     adjustments: dict[str, tuple[float, list[str], list[str]]] = {}
     multipliers: dict[str, float | None] = {}
+    themes: dict[str, float | None] = {}
     for r in candidates:
         alpha_id = str(r["alphaId"])
         vault = stored.get(alpha_id) or {}
         multiplier = _multiplier_of(json_list(vault.get("pyramids")), table)
         multipliers[alpha_id] = multiplier
-        retention = base_payment.sub_universe_retention(
-            checks_of(vault.get("checks")),
-            base_payment.num(r.get("sharpe")),
+        checks = checks_of(vault.get("checks"))
+        theme = base_payment.theme_multiplier(checks)
+        themes[alpha_id] = theme
+        retention = base_payment.sub_universe_retention(checks, base_payment.num(r.get("sharpe")))
+        adjustments[alpha_id] = base_payment.value_adjustment(
+            r, shares, multiplier, retention, theme
         )
-        adjustments[alpha_id] = base_payment.value_adjustment(r, shares, multiplier, retention)
 
     advice = await asyncio.to_thread(
         submit_advisor.advise, candidates, days, locked, adjustments=adjustments
@@ -593,6 +600,7 @@ async def _advice(state: State) -> tuple[list[AdvisedAlpha], dict[str, Any]]:
                     "correlation": item.correlation,
                     "maxCorrelation": item.max_correlation,
                     "multiplier": multipliers.get(item.alpha_id),
+                    "themeMultiplier": themes.get(item.alpha_id),
                 }
             )
         )
@@ -703,33 +711,64 @@ async def base_payment_report(state: State) -> dict[str, Any]:
             "rank": a.rank,
             "settings": a.settings,
             "multiplier": a.multiplier,
+            "theme": a.theme_multiplier,
         }
         for a in advised
         if a.status == "recommended"
     ]
-    plan = base_payment.daily_plan(recommended, qty)
+    today = qty["today"]
+    # A theme Alpha today is one whose own MATCHES_THEMES check passed, as BRAIN reported it.
+    # The pyramid multiplier is not a theme: nearly every Alpha carries one above 1x.
+    themed = any(
+        r.get("theme") is not None
+        and (md := base_payment.as_platform_time(r.get("date_submitted"))) is not None
+        and md.date().isoformat() == today
+        for r in submitted
+    )
+    plan = base_payment.daily_plan(recommended, qty, themed)
 
     recent = base_payment.recent_rows(submitted, now, 30)
     table = await _multipliers(state)
-    today = qty["today"]
-    themed: bool | None = None
-    if table:
-        themed = any(
-            (m := _multiplier_of(r["pyramids"], table)) is not None
-            and m > 1.0
-            and (md := base_payment.as_platform_time(r.get("date_submitted"))) is not None
-            and md.date().isoformat() == today
-            for r in submitted
-        )
+    health = base_payment.account_health(*(await _account_figures(state)), submitted, now)
     return {
         "quantity": qty,
         "diversity": div,
         "growth": grow,
         "osmosis": osm,
         "plan": plan,
-        "checklist": base_payment.checklist(qty, div, grow, osm, recent, themed),
+        "checklist": [
+            *base_payment.checklist(qty, div, grow, osm, recent, themed),
+            *base_payment.health_checklist(health),
+        ],
+        "account": health,
         "multipliersKnown": bool(table),
     }
+
+
+async def _account_figures(
+    state: State,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, list[tuple[str, float]]]:
+    """What BRAIN reports about the account itself: the consultant summary, the leaderboard
+    row and the daily base payment. Each is read on its own and left out when BRAIN refuses
+    it; nothing here may stop the rest of the report."""
+    summary: dict[str, Any] | None = None
+    leader: dict[str, Any] | None = None
+    payments: list[tuple[str, float]] = []
+    try:
+        summary = await state.endpoints.consultant_summary() or None
+    except Exception:
+        log.warning("base_payment.summary_failed", exc_info=True)
+    user_id = state.auth.session.user_id
+    if user_id:
+        try:
+            leader = await state.endpoints.leaderboard_row(user_id)
+        except Exception:
+            log.warning("base_payment.leaderboard_failed", exc_info=True)
+    try:
+        payments = await state.endpoints.base_payment_days()
+    except Exception:
+        log.warning("base_payment.payments_failed", exc_info=True)
+    return summary, leader, payments
 
 
 class RobustnessRequest(BaseModel):

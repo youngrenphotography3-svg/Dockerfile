@@ -100,7 +100,37 @@ export interface ChecklistItem {
   detail: string
 }
 
+export interface PayBlock {
+  days: number
+  average: number | null
+}
+
+/** What BRAIN itself reports about the account: the inputs behind the Value Factor. */
+export interface AccountHealth {
+  valueFactor: number | null
+  submissionDays: number
+  valueFactorDays: number
+  combinedAlphaPerformance: number | null
+  previousCombinedAlphaPerformance: number | null
+  combinedPowerPoolPerformance: number | null
+  meanProdCorrelation: number | null
+  peerMeanProdCorrelation: number
+  meanSelfCorrelation: number | null
+  dailyOsmosisRank: number | null
+  payment: {
+    windowDays: number
+    days: number
+    average: number | null
+    byCount: ({ alphas: number } & PayBlock)[]
+    themeDays: PayBlock
+    otherDays: PayBlock
+  }
+  flags: string[]
+  known: boolean
+}
+
 export interface BasePaymentReport {
+  account: AccountHealth
   quantity: Quantity
   diversity: Diversity
   growth: Growth[]

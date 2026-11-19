@@ -297,8 +297,9 @@ async def field_pool(
     """Fields of the chosen datasets, and which searched universes have each.
 
     BRAIN scopes fields by universe, so a field missing from one universe is not dropped:
-    the search only pairs it with the universes that have it. Ordered by coverage in the
-    first universe, the chosen market's, so a capped first pass tries the most complete.
+    the search only pairs it with the universes that have it. Ordered least crowded first
+    among the well-covered (see :func:`by_crowding`), so a capped first pass spends its
+    budget where production correlation has the most room.
 
     ``narrow`` is the Data Explorer's filter the datasets were chosen under: only fields it
     shows are searched, read through the same query so the two can never disagree.
@@ -308,6 +309,7 @@ async def field_pool(
     if not types:
         return Pool({}, (), {}, 0)
     found: dict[str, dict[str, str]] = {}
+    seen: dict[str, tuple[float | None, int | None]] = {}
     for universe in universes:
         page = await queries.fields(
             Tuple4(region=region, delay=delay, universe=universe),
@@ -325,11 +327,15 @@ async def field_pool(
         rows = page.get("results") or []
         if rows:
             found[universe] = {str(r["field_id"]): str(r["field_type"]) for r in rows}
+            for r in rows:
+                seen.setdefault(str(r["field_id"]), _crowd_row(r))
 
     fields: dict[str, str] = {}
-    for held in found.values():
-        for field_id, field_type in held.items():
-            fields.setdefault(field_id, field_type)
+    for field_id in by_crowding(seen):
+        for held in found.values():
+            if field_id in held:
+                fields.setdefault(field_id, held[field_id])
+                break
     skipped = 0
     if not allow_vector:
         skipped = sum(1 for t in fields.values() if t == "VECTOR")
@@ -337,6 +343,44 @@ async def field_pool(
     kept = tuple(u for u, held in found.items() if any(f in held for f in fields))
     absent = {u: [f for f in fields if f not in found[u]] for u in kept}
     return Pool(fields, kept, {u: ids for u, ids in absent.items() if ids}, skipped)
+
+
+#: Fields below this coverage of the universe come after every better-covered one, whatever
+#: their crowding: a sparse field's Alpha is thin and fails the sub-universe test.
+CROWDING_MIN_COVERAGE = 0.6
+
+
+def _crowd_row(row: dict[str, Any]) -> tuple[float | None, int | None]:
+    coverage = row.get("coverage")
+    alphas = row.get("alpha_count")
+    return (
+        float(coverage) if isinstance(coverage, (int, float)) else None,
+        int(alphas) if isinstance(alphas, (int, float)) else None,
+    )
+
+
+def by_crowding(seen: dict[str, tuple[float | None, int | None]]) -> list[str]:
+    """Field ids, least crowded first among the well-covered, then the sparse ones.
+
+    Crowding is the field's ``alphaCount`` in the market: how many Alphas already use it.
+    BRAIN's production correlation is the maximum over every consultant Alpha in the
+    region, and a field thousands of Alphas already trade is where that maximum is high.
+    Unknown crowding sorts after known (an older catalog did not store it); ties keep the
+    better coverage first, then the id, so the order never depends on the database's.
+    """
+
+    def key(item: tuple[str, tuple[float | None, int | None]]) -> tuple[Any, ...]:
+        field_id, (cov, alphas) = item
+        covered = cov is None or cov >= CROWDING_MIN_COVERAGE
+        return (
+            not covered,
+            alphas is None,
+            alphas if alphas is not None else 0,
+            -(cov if cov is not None else 0.0),
+            field_id,
+        )
+
+    return [field_id for field_id, _ in sorted(seen.items(), key=key)]
 
 
 # --- drawing a point --------------------------------------------------------
