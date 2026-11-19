@@ -531,6 +531,7 @@ def validate(
             and node.value.lower() not in ("true", "false", "nan")
         ):
             problems.append(f"{node.value} is not a data field here.")
+    problems.extend(_used_before_defined(tree, assigned))
     problems.extend(_unused_assignments(tree))
     return problems
 
@@ -576,6 +577,34 @@ def _literal(arg: Node) -> str:
     if arg.kind == "unary" and arg.args:
         return f"-{arg.args[0].value}"
     return arg.value or arg.kind
+
+
+def _used_before_defined(tree: Node, assigned: AbstractSet[str]) -> list[str]:
+    """Names a statement reads before any earlier statement assigns them.
+
+    BRAIN runs statements in order, so ``x = rank(s); s = ...; x`` and ``s = rank(s)`` both
+    fail with "Attempted to use unknown variable". Evolution's crossover grafts a call from
+    one parent into the other, and when both came from the same template the call's names
+    (``s``, ``f``) exist in the child, only later or not yet: the name check alone let such
+    children through, 5 of one task's 60 failures (audit follow-up, 2026-11-19).
+    """
+    statements = list(tree.args) if tree.kind == "seq" else [tree]
+    defined: set[str] = set()
+    problems: list[str] = []
+    for statement in statements:
+        body = statement.args[0] if statement.kind == "assign" and statement.args else statement
+        for path, node in walk(body):
+            if (
+                node.kind == "name"
+                and node.value in assigned
+                and node.value not in defined
+                # A keyword value names an option, not a variable.
+                and not (path and path[-1] >= len(node_at(body, path[:-1]).args))
+            ):
+                problems.append(f"{node.value} is used before it is defined.")
+        if statement.kind == "assign":
+            defined.add(statement.value)
+    return list(dict.fromkeys(problems))
 
 
 def _unused_assignments(tree: Node) -> list[str]:
