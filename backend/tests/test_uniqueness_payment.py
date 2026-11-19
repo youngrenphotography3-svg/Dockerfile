@@ -148,3 +148,10 @@ def test_field_swaps_lean_toward_untouched_fields() -> None:
     rng = random.Random(7)
     picks = [ga._mutated(rng, node, "field", market) for _ in range(500)]
     assert picks.count("quiet") > 450
+
+
+def test_daily_plan_does_not_lift_a_weak_theme_alpha() -> None:
+    qty = {"alphaRemaining": 1, "d0Remaining": 5, "superToday": 0, "superCap": 1}
+    rec = [_rec("A", 26, "USA"), _rec("T", 12.5, "GLB", 3.29)]
+    ids = [p["alphaId"] for p in bp.daily_plan(rec, qty)["picks"]]
+    assert ids == ["A"]

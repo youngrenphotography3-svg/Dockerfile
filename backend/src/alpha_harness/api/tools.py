@@ -551,7 +551,11 @@ async def _advice(state: State) -> tuple[list[AdvisedAlpha], dict[str, Any]]:
         marked = {str(a) for a in (await session.scalars(select(Submission.alpha_id))).all()}
     submitted = await _submitted_rows(state)
     locked = sorted(marked | {str(r["alpha_id"]) for r in submitted})
-    candidates = [r for r in rows.values() if not r.get("submitted")]
+    # An Alpha BRAIN already has as submitted is never a candidate, even when the task row
+    # that found it was not marked: the vault's submitted set is the authority.
+    candidates = [
+        r for r in rows.values() if not r.get("submitted") and str(r["alphaId"]) not in locked
+    ]
     wanted = list(dict.fromkeys([*(str(r["alphaId"]) for r in candidates), *locked]))
     days = await state.alphas.daily_pnl(wanted)
     # Without a series an Alpha's overlap with the book is unchecked, and that one reads as
