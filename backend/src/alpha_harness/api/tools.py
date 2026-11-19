@@ -10,6 +10,7 @@ like any lab.
 
 import asyncio
 import json
+import time
 from datetime import UTC, datetime
 from typing import Any, Literal, Self
 
@@ -18,7 +19,8 @@ from fastapi import APIRouter
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import delete, select
 
-from ..brain.schemas import REGION_AGNOSTIC_REGION
+from ..brain.filters import AlphaQuery, Filter
+from ..brain.schemas import REGION_AGNOSTIC_REGION, Alpha
 from ..catalog.pyramids import pyramid_grid
 from ..db.models import Submission, Trial, TrialState, utcnow
 from ..engine.packer import MAX_BATCH
@@ -543,8 +545,44 @@ def _multiplier_of(pyramids: list[str], table: dict[tuple[str, int, str], float]
     return best
 
 
+#: Least time between two reads of BRAIN's newest submissions for the advisor.
+SUBMITTED_REFRESH_SECONDS = 600.0
+#: One page of the newest submissions: more than a fortnight of four a day.
+SUBMITTED_REFRESH_PAGE = 100
+_submitted_refreshed_at: list[float] = [float("-inf")]
+
+
+async def _refresh_submitted(state: State) -> None:
+    """Store BRAIN's newest submissions before advising, at most every ten minutes.
+
+    The vault learns that an Alpha was submitted only from a sync, so without this an Alpha
+    submitted on BRAIN since the last one still reads as a candidate (seen 2026-11-19: one
+    submitted on 11-10 was put first in the day's plan). One page, newest first; when BRAIN
+    cannot answer, the advice goes on from what the vault holds.
+    """
+    now = time.monotonic()
+    if now - _submitted_refreshed_at[0] < SUBMITTED_REFRESH_SECONDS:
+        return
+    _submitted_refreshed_at[0] = now
+    try:
+        page = await state.endpoints.list_alphas(
+            AlphaQuery(
+                limit=SUBMITTED_REFRESH_PAGE,
+                offset=0,
+                order="-dateSubmitted",
+                filters=[Filter("status", "!=", "UNSUBMITTED")],
+            )
+        )
+        alphas = [Alpha.model_validate(raw) for raw in page.get("results") or []]
+        if alphas:
+            await state.alphas.save_alphas(alphas)
+    except Exception:
+        log.warning("submit_advisor.refresh_submitted_failed", exc_info=True)
+
+
 async def _advice(state: State) -> tuple[list[AdvisedAlpha], dict[str, Any]]:
     """The advisor's output, with the base-payment levers applied, plus the figures they used."""
+    await _refresh_submitted(state)
     found = await submittable_alphas(state)
     rows = {a.alpha_id: a.model_dump(by_alias=True) for a in found if a.alpha_id}
     async with state.db.session() as session:
