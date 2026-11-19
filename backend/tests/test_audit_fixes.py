@@ -116,6 +116,13 @@ def test_unused_statement_is_refused() -> None:
     assert validate(parse("a = rank(close); ts_rank(a, 5)"), TABLE, NAMES) == []
 
 
+def test_variable_used_before_its_statement_is_refused() -> None:
+    # What Evolution's crossover produced: a call reading ``s`` grafted above ``s = ...``.
+    assert validate(parse("x = rank(s); s = rank(close); x"), TABLE, NAMES)
+    assert validate(parse("s = rank(s); s"), TABLE, NAMES)
+    assert validate(parse("f = rank(close); s = rank(f); ts_rank(s, 5)"), TABLE, NAMES) == []
+
+
 # --- mutation keeps slow signals slow ------------------------------------------------------
 
 
