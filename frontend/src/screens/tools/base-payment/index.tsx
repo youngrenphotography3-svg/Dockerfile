@@ -149,6 +149,7 @@ function Account({ report }: { report: BasePaymentReport }) {
           <p>
             By Alphas submitted that day:{' '}
             {pay.byCount
+              .filter((b) => b.alphas > 0)
               .map((b) => `${b.alphas} → ${fmt.ratio(b.average)} (${b.days} d)`)
               .join(' · ')}
           </p>

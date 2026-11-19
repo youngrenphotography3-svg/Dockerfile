@@ -71,6 +71,8 @@ BONUS_THEME_MAX = 8.0
 BONUS_MATCHED_THEME = 12.0
 #: How far ahead of an otherwise better pick the day's first theme Alpha is put.
 THEME_PICK_BONUS = 15.0
+#: ...but only for an Alpha scoring at least this share of the day's best recommendation.
+THEME_PICK_MIN_SHARE = 0.6
 BONUS_DIVERSE = 3.0
 PENALTY_MARGIN = 10.0
 PENALTY_CONCENTRATED = 5.0
@@ -772,12 +774,15 @@ def daily_plan(
     pool = list(recommended)
     taken_scopes: Counter[str] = Counter()
     have_theme = bool(themed_today)
+    best = max((float(i["score"]) for i in pool), default=0.0)
     while pool and len(picks) < slots:
 
         def adjusted(item: dict[str, Any], want_theme: bool = not have_theme) -> float:
             settings = item.get("settings") or {}
             scope = f"{settings.get('region') or '?'}/D{0 if settings.get('delay') == 0 else 1}"
-            bonus = THEME_PICK_BONUS if item.get("theme") and want_theme else 0.0
+            # A theme lifts a sound Alpha to the front, never a weak one past sound ones.
+            sound = float(item["score"]) >= THEME_PICK_MIN_SHARE * best
+            bonus = THEME_PICK_BONUS if item.get("theme") and want_theme and sound else 0.0
             return float(item["score"]) + bonus - 6.0 * taken_scopes[scope]
 
         pool.sort(key=lambda i: (-adjusted(i), int(i.get("rank") or 10**9), str(i["alphaId"])))
