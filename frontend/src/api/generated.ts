@@ -2411,6 +2411,8 @@ export interface components {
             taskName: string;
             /** Testsharpe */
             testSharpe: number | null;
+            /** Thememultiplier */
+            themeMultiplier?: number | null;
             /** Turnover */
             turnover: number | null;
         };

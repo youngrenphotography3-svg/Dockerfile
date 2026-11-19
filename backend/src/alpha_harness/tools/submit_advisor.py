@@ -47,13 +47,15 @@ EASY_TURNOVER = 0.30
 #: Most Alphas the advisor puts forward. BRAIN takes four a day, so ten is a few days' worth.
 MAX_RECOMMENDED = 10
 
-#: What each part of the score is worth, out of 100.
+#: What each part of the score is worth, out of 100. Distinctness from production carries
+#: as much as fitness: the Quality Factor rewards low correlation to BRAIN's Alphas, and of
+#: two Alphas that both pass, the less correlated one is the one worth submitting first.
 WEIGHTS = {
-    "sharpe": 45,
-    "fitness": 20,
+    "sharpe": 40,
+    "fitness": 15,
     "stability": 15,
     "turnover": 10,
-    "correlation": 10,
+    "correlation": 20,
 }
 
 type Status = Literal["recommended", "similar", "held_back", "needs_check", "waiting"]

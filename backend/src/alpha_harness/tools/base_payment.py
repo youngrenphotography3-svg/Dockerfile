@@ -65,6 +65,12 @@ OSMOSIS_TURNOVER = 0.20
 #: Weight changes the Submit Advisor applies on top of its 0-100 score, and no more: the
 #: score ranks, it never overrides a check.
 BONUS_THEME_MAX = 8.0
+#: A matched theme (``MATCHES_THEMES`` = PASS). On the account's own record (2026-11), a
+#: single theme Alpha paid about as much as four that matched none, so a match outweighs
+#: the pyramid multiplier, which almost every Alpha carries.
+BONUS_MATCHED_THEME = 12.0
+#: How far ahead of an otherwise better pick the day's first theme Alpha is put.
+THEME_PICK_BONUS = 15.0
 BONUS_DIVERSE = 3.0
 PENALTY_MARGIN = 10.0
 PENALTY_CONCENTRATED = 5.0
@@ -115,6 +121,27 @@ def sub_universe_retention(checks: Sequence[dict[str, Any]], sharpe: float | Non
             value = num(check.get("value"))
             return None if value is None else value / sharpe
     return None
+
+
+def theme_multiplier(checks: Sequence[dict[str, Any]]) -> float | None:
+    """The Quality Factor multiplier of the themes this Alpha matches, or ``None``.
+
+    BRAIN reports an active theme as a ``MATCHES_THEMES`` check: ``PASS`` with a combined
+    ``multiplier`` when the Alpha matches (several themes add up: sum minus count plus one),
+    ``WARNING`` or ``PENDING`` when it does not or is not judged yet. Only a ``PASS`` counts.
+    This is separate from the pyramid multiplier, which every Alpha in a pyramid gets.
+    """
+    best: float | None = None
+    for check in checks:
+        if str(check.get("name", "")).upper() != "MATCHES_THEMES":
+            continue
+        if str(check.get("result", "")).upper() != "PASS":
+            continue
+        value = num(check.get("multiplier"))
+        value = 1.0 if value is None else value
+        if best is None or value > best:
+            best = value
+    return best
 
 
 def turnover_bucket(turnover: float | None) -> str:
@@ -489,15 +516,24 @@ def value_adjustment(
     shares: dict[str, dict[str, float]] | None,
     multiplier: float | None,
     retention: float | None,
+    theme: float | None = None,
 ) -> tuple[float, list[str], list[str]]:
     """Points to add to an advisor score, with the strengths and cautions that explain them.
 
-    Everything here is a lever the base-payment articles name: the theme or pyramid
+    Everything here is a lever the base-payment articles name: a matched theme, the pyramid
     multiplier, margin, sub-universe Sharpe retention, and concentration.
     """
     delta = 0.0
     strengths: list[str] = []
     cautions: list[str] = []
+
+    if theme is not None:
+        delta += BONUS_MATCHED_THEME
+        strengths.append(
+            f"Matches an active theme ({theme:.2f}x on the Quality Factor)"
+            if theme > 1.0
+            else "Matches an active theme"
+        )
 
     if multiplier is not None and multiplier > 1.0:
         gain = min(BONUS_THEME_MAX, (multiplier - 1.0) * BONUS_THEME_MAX)
@@ -551,30 +587,198 @@ def value_adjustment(
     return delta, strengths, cautions
 
 
+# -- Account health: what BRAIN itself reports about the account ------------------
+
+#: "A consultant must have at least 20 unique submission days within the last 3 months",
+#: or the Value Factor is the 0.5 default.
+VALUE_FACTOR_DAYS = 20
+VALUE_FACTOR_DEFAULT = 0.5
+#: The consultant leaderboard's median mean production correlation (799 consultants with
+#: 20+ submissions, read 2026-11-19). Above it, the account is less distinct than most.
+PEER_MEAN_PROD_CORRELATION = 0.65
+#: Most Alphas a day that count toward the Quantity Factor; days are grouped up to here.
+COUNT_GROUPS = DAILY_ALPHAS
+
+
+def _avg(values: Sequence[float]) -> float | None:
+    return round(sum(values) / len(values), 2) if values else None
+
+
+def account_health(
+    summary: dict[str, Any] | None,
+    leader: dict[str, Any] | None,
+    payments: Sequence[tuple[str, float]],
+    rows: Sequence[dict[str, Any]],
+    now: datetime,
+) -> dict[str, Any]:
+    """The account-level figures behind base payment, as BRAIN reports them, set against
+    the account's own submission record.
+
+    ``summary`` is ``/users/self/consultant/summary``, ``leader`` the account's leaderboard
+    row, ``payments`` the daily base payment and ``rows`` the submitted Alphas, each with
+    ``theme`` already read from its checks. Any input may be missing: what cannot be read
+    is ``None``, never a guess.
+    """
+    perf = ((summary or {}).get("performance") or {}) if summary else {}
+    current = perf.get("current") or {}
+    previous = perf.get("previous") or {}
+    combined = num(current.get("combinedAlphaPerformance"))
+    combined_before = num(previous.get("combinedAlphaPerformance"))
+    power_pool = num(current.get("combinedPowerPoolAlphaPerformance"))
+    value_factor = num((leader or {}).get("valueFactor"))
+    mean_prod = num((leader or {}).get("meanProdCorrelation"))
+    mean_self = num((leader or {}).get("meanSelfCorrelation"))
+    osmosis_rank = num((leader or {}).get("dailyOsmosisRank"))
+
+    today = now.astimezone(PLATFORM_TZ).date()
+    start = today - timedelta(days=RECENT_DAYS)
+    counts: Counter[str] = Counter()
+    themed: set[str] = set()
+    days_90: set[date] = set()
+    for row in rows:
+        moment = as_platform_time(row.get("date_submitted"))
+        if moment is None:
+            continue
+        day = moment.date()
+        if day >= start:
+            days_90.add(day)
+        if str(row.get("sim_type") or "").upper() == "SUPER":
+            continue
+        counts[day.isoformat()] += 1
+        if row.get("theme") is not None:
+            themed.add(day.isoformat())
+
+    recent_pay = [
+        (d, v) for d, v in payments if d >= (today - timedelta(days=RECENT_DAYS)).isoformat()
+    ]
+    by_count: dict[int, list[float]] = {}
+    theme_pay: list[float] = []
+    other_pay: list[float] = []
+    for day, value in recent_pay:
+        n = min(counts.get(day, 0), COUNT_GROUPS)
+        by_count.setdefault(n, []).append(value)
+        (theme_pay if day in themed else other_pay).append(value)
+
+    flags: list[str] = []
+    if combined is not None and combined < 0:
+        before = f" (last quarter {combined_before:.2f})" if combined_before is not None else ""
+        flags.append(
+            f"Combined Alpha Performance this quarter is {combined:.2f}{before}. The Value "
+            "Factor is the out-of-sample performance of this combination, so its next refresh "
+            "can lower base pay: favour regular Alphas whose test-year Sharpe holds, with "
+            "turnover under 30% and margin over 4 bps."
+        )
+    if value_factor is not None and value_factor == VALUE_FACTOR_DEFAULT:
+        if len(days_90) < VALUE_FACTOR_DAYS:
+            flags.append(
+                f"Value Factor is the 0.5 default: it needs {VALUE_FACTOR_DAYS} submission days "
+                f"in 3 months, and the account has {len(days_90)}."
+            )
+        else:
+            flags.append(
+                "Value Factor reads 0.5, the platform average. It refreshes every 4-6 weeks "
+                "from the last 3 months' submissions."
+            )
+    if mean_prod is not None and mean_prod > PEER_MEAN_PROD_CORRELATION:
+        flags.append(
+            f"Mean production correlation {mean_prod:.2f} is above most consultants' "
+            f"({PEER_MEAN_PROD_CORRELATION:.2f}): lower-correlation picks lift the Quality Factor."
+        )
+    if len(theme_pay) >= 1 and len(other_pay) >= 1:
+        t, o = _avg(theme_pay), _avg(other_pay)
+        if t is not None and o is not None and t > o:
+            flags.append(
+                f"Days with a theme Alpha paid {t:.2f} on average against {o:.2f} without one."
+            )
+
+    return {
+        "valueFactor": value_factor,
+        "submissionDays": len(days_90),
+        "valueFactorDays": VALUE_FACTOR_DAYS,
+        "combinedAlphaPerformance": combined,
+        "previousCombinedAlphaPerformance": combined_before,
+        "combinedPowerPoolPerformance": power_pool,
+        "meanProdCorrelation": mean_prod,
+        "peerMeanProdCorrelation": PEER_MEAN_PROD_CORRELATION,
+        "meanSelfCorrelation": mean_self,
+        "dailyOsmosisRank": osmosis_rank,
+        "payment": {
+            "windowDays": RECENT_DAYS,
+            "days": len(recent_pay),
+            "average": _avg([v for _, v in recent_pay]),
+            "byCount": [
+                {"alphas": n, "days": len(v), "average": _avg(v)}
+                for n, v in sorted(by_count.items())
+            ],
+            "themeDays": {"days": len(theme_pay), "average": _avg(theme_pay)},
+            "otherDays": {"days": len(other_pay), "average": _avg(other_pay)},
+        },
+        "flags": flags,
+        "known": summary is not None or leader is not None or bool(payments),
+    }
+
+
+def health_checklist(health: dict[str, Any]) -> list[dict[str, str]]:
+    """Checklist lines for what BRAIN reports about the account, when it reported it."""
+    out: list[dict[str, str]] = []
+    combined = health.get("combinedAlphaPerformance")
+    if combined is not None:
+        out.append(
+            {
+                "label": "Combined Alpha Performance positive this quarter",
+                "status": "ok" if combined > 0 else "warn",
+                "detail": f"{combined:.2f} (feeds the Value Factor)",
+            }
+        )
+    days = int(health.get("submissionDays") or 0)
+    out.append(
+        {
+            "label": f"{VALUE_FACTOR_DAYS}+ submission days in 3 months",
+            "status": "ok" if days >= VALUE_FACTOR_DAYS else "todo",
+            "detail": f"{days} days; fewer leaves the Value Factor at the 0.5 default",
+        }
+    )
+    mean_prod = health.get("meanProdCorrelation")
+    if mean_prod is not None:
+        out.append(
+            {
+                "label": "Mean production correlation at or below most consultants'",
+                "status": "ok" if mean_prod <= PEER_MEAN_PROD_CORRELATION else "warn",
+                "detail": f"{mean_prod:.2f} against {PEER_MEAN_PROD_CORRELATION:.2f}",
+            }
+        )
+    return out
+
+
 # -- Today's plan -----------------------------------------------------------
 
 
 def daily_plan(
     recommended: Sequence[dict[str, Any]],
     qty: dict[str, Any],
+    themed_today: bool | None = None,
 ) -> dict[str, Any]:
     """Which of the Advisor's recommendations to submit today, within the allowance.
 
     The Advisor already ranks and de-duplicates; this only spreads the day's picks across
-    markets, so four submissions are not four of one region/delay, and respects the D0 cap.
-    ``recommended`` rows carry ``alphaId``, ``score``, ``settings`` and ``multiplier``.
+    markets, so four submissions are not four of one region/delay, respects the D0 cap, and
+    puts one theme-matching Alpha in the day when there is one and none was submitted yet.
+    ``recommended`` rows carry ``alphaId``, ``score``, ``settings``, ``multiplier`` and
+    ``theme``; ``themed_today`` says a theme Alpha already went in today.
     """
     slots = qty["alphaRemaining"]
     d0_left = qty["d0Remaining"]
     picks: list[dict[str, Any]] = []
     pool = list(recommended)
     taken_scopes: Counter[str] = Counter()
+    have_theme = bool(themed_today)
     while pool and len(picks) < slots:
 
-        def adjusted(item: dict[str, Any]) -> float:
+        def adjusted(item: dict[str, Any], want_theme: bool = not have_theme) -> float:
             settings = item.get("settings") or {}
             scope = f"{settings.get('region') or '?'}/D{0 if settings.get('delay') == 0 else 1}"
-            return float(item["score"]) - 6.0 * taken_scopes[scope]
+            bonus = THEME_PICK_BONUS if item.get("theme") and want_theme else 0.0
+            return float(item["score"]) + bonus - 6.0 * taken_scopes[scope]
 
         pool.sort(key=lambda i: (-adjusted(i), int(i.get("rank") or 10**9), str(i["alphaId"])))
         item = pool.pop(0)
@@ -584,6 +788,9 @@ def daily_plan(
             continue
         scope = f"{settings.get('region') or '?'}/D{0 if settings.get('delay') == 0 else 1}"
         reasons = [f"Advisor score {float(item['score']):.0f}"]
+        if item.get("theme"):
+            reasons.append(f"matches an active theme ({float(item['theme']):.2f}x)")
+            have_theme = True
         if item.get("multiplier") and item["multiplier"] > 1:
             reasons.append(f"{item['multiplier']:.1f}x pyramid multiplier")
         if taken_scopes[scope] == 0:
@@ -605,6 +812,7 @@ def daily_plan(
     tips: list[str] = []
     if short:
         tips = [
+            "Build one Alpha for an active theme; its MATCHES_THEMES check must show PASS.",
             "Port a submitted Alpha to another region or universe (Settings Sampler).",
             "Re-check Alphas still waiting on BRAIN's checks (Submit Advisor).",
             "Start a lab on a pyramid with a high multiplier (Pyramids).",
@@ -659,9 +867,11 @@ def checklist(
     if themed_today is not None:
         out.append(
             item(
-                "At least one theme / multiplier Alpha today",
+                "At least one theme Alpha today",
                 "ok" if themed_today else "todo",
-                "A pyramid multiplier above 1x applies" if themed_today else "None yet today",
+                "BRAIN's MATCHES_THEMES check passed on one of today's submissions"
+                if themed_today
+                else "None yet today: check MATCHES_THEMES shows PASS before submitting",
             )
         )
     out.append(

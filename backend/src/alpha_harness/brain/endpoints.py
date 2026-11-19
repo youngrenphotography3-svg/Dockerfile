@@ -45,6 +45,13 @@ V_ALPHA_SUMMARY = "4.0"
 
 #: Daily submitted-Alpha counts, the series behind BRAIN's own "Submitted Alphas".
 SUBMISSIONS_PATH = "/users/self/activities/submissions"
+#: The daily base payment, in the account's currency, as BRAIN's Payments page charts it.
+BASE_PAYMENT_PATH = "/users/self/activities/base-payment"
+#: Genius level, the quarter's combined performances, Osmosis allocations.
+CONSULTANT_SUMMARY_PATH = "/users/self/consultant/summary"
+#: The consultant leaderboard; ``?user=<id>`` narrows it to one row (value factor, mean
+#: production and self correlation, daily Osmosis rank).
+LEADERBOARD_PATH = "/consultant/boards/leader"
 
 #: The simulation types this application sends; their per-type settings trees are merged in.
 #: Region-agnostic is included because its only region, ``ALL``, appears nowhere else — so
@@ -417,6 +424,35 @@ class BrainEndpoints:
             for r in rows
             if isinstance(r, list) and len(r) >= 2 and str(r[1]).lstrip("-").isdigit()
         ]
+
+    async def base_payment_days(self) -> list[tuple[str, float]]:
+        """Base payment per day, as ``(date, amount)`` oldest first. Undocumented shape:
+        ``{records: {records: [[date, value], ...]}}``, the same envelope as submissions."""
+        body = (await self.client.request_retrying("GET", BASE_PAYMENT_PATH)).body
+        rows = ((body or {}).get("records") or {}).get("records") or []
+        return [
+            (str(r[0]), float(r[1]))
+            for r in rows
+            if isinstance(r, list) and len(r) >= 2 and isinstance(r[1], (int, float))
+        ]
+
+    async def consultant_summary(self) -> dict[str, Any]:
+        """The quarter's standing: ``performance.current`` carries the combined Alpha and
+        Power Pool performances BRAIN's Value Factor is built from. Undocumented."""
+        r = await self.client.request_retrying("GET", CONSULTANT_SUMMARY_PATH)
+        return r.body if isinstance(r.body, dict) else {}
+
+    async def leaderboard_row(self, user_id: str) -> dict[str, Any] | None:
+        """This consultant's leaderboard row: ``valueFactor``, ``meanProdCorrelation``,
+        ``meanSelfCorrelation``, ``dailyOsmosisRank``. ``None`` when BRAIN has none."""
+        r = await self.client.request_retrying("GET", LEADERBOARD_PATH, params={"user": user_id})
+        results = r.body.get("results") if isinstance(r.body, dict) else None
+        if not isinstance(results, list):
+            return None
+        for row in results:
+            if isinstance(row, dict) and row.get("user") == user_id:
+                return row
+        return None
 
     async def list_data_sets_all(self, **params: Any) -> list[DataSet]:
         """Every dataset matching a scope, however partial that scope is.

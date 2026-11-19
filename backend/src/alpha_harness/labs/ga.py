@@ -23,7 +23,7 @@ import json
 import math
 import random
 from collections import defaultdict
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -212,6 +212,10 @@ class Market:
     #: Every field of the market and the grouping fields: what a child may name.
     names: frozenset[str]
     neutralizations: tuple[str, ...]
+    #: How many Alphas already use each field in this market (BRAIN's ``alphaCount``).
+    #: A field swap leans toward the less used: production correlation is the maximum
+    #: over every consultant Alpha in the region, and it is highest where they crowd.
+    crowd: dict[str, int] = field(default_factory=dict[str, int])
 
     def peers(self, node: Node) -> list[str]:
         """Operators that can stand in for this call: same category, the same inputs."""
@@ -298,6 +302,11 @@ def build_market(
         by_dataset={k: tuple(v) for k, v in by_dataset.items()},
         names=frozenset(str(f["field_id"]) for f in fields) | frozenset(search.GROUPS),
         neutralizations=tuple(neutralizations),
+        crowd={
+            str(f["field_id"]): int(f["alpha_count"])
+            for f in fields
+            if isinstance(f.get("alpha_count"), (int, float))
+        },
     )
 
 
@@ -317,7 +326,7 @@ async def market_for(
     key = (region, delay, universe, tuple(neutralizations), len(operators))
     if key not in _markets:
         fields = await catalog.query(
-            "SELECT field_id, dataset_id, field_type, coverage FROM data_field "
+            "SELECT field_id, dataset_id, field_type, coverage, alpha_count FROM data_field "
             "WHERE instrument_type = 'EQUITY' AND region = ? AND delay = ? AND universe = ?",
             [region, delay, universe],
         )
@@ -395,12 +404,22 @@ def _neighbour(rng: random.Random, steps: tuple[int, ...], current: int) -> int:
     return rng.choice([steps[i] for i in (at - 1, at + 1) if 0 <= i < len(steps)])
 
 
+def crowding_weight(market: Market, field_id: str) -> float:
+    """How likely a field swap is to pick ``field_id``: ``1 / sqrt(1 + alphaCount)``.
+
+    A field 10,000 Alphas use is drawn about a hundredth as often as an untouched one, never
+    excluded. Unknown crowding weighs as untouched, as an older catalog did not store it.
+    """
+    return 1.0 / math.sqrt(1.0 + max(0, market.crowd.get(field_id, 0)))
+
+
 def _mutated(rng: random.Random, node: Node, kind: str, market: Market) -> str:
     if kind == "window":
         return str(_neighbour(rng, WINDOWS, int(node.value)))
     if kind == "field":
         dataset = market.dataset_of[node.value]
-        return rng.choice([f for f in market.by_dataset[dataset] if f != node.value])
+        others = [f for f in market.by_dataset[dataset] if f != node.value]
+        return rng.choices(others, weights=[crowding_weight(market, f) for f in others])[0]
     if kind == "group":
         return rng.choice([g for g in search.GROUPS if g != node.value])
     if node.kind == "binary":

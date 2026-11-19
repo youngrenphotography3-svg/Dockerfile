@@ -74,6 +74,94 @@ function RobustnessButton({ alphaId }: { alphaId: string }) {
   )
 }
 
+const signTone = (value: number | null): Tone =>
+  value == null ? 'muted' : value > 0 ? 'profit' : 'loss'
+
+function Account({ report }: { report: BasePaymentReport }) {
+  const a = report.account
+  if (!a.known) {
+    return (
+      <Panel title="Account">
+        <Notice tone="info">
+          BRAIN's consultant summary, leaderboard row and payment history could not be read just
+          now. Sign in again or refresh to see them.
+        </Notice>
+      </Panel>
+    )
+  }
+  const pay = a.payment
+  return (
+    <Panel
+      title="Account"
+      description="What BRAIN reports about your account. The Value Factor is the out-of-sample performance of your recent Alphas combined, so the combined performance below is where it is heading."
+    >
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <Metric
+          label="Combined Alpha perf."
+          value={fmt.ratio(a.combinedAlphaPerformance)}
+          tone={signTone(a.combinedAlphaPerformance)}
+          hint={
+            a.previousCombinedAlphaPerformance == null
+              ? 'this quarter'
+              : `last quarter ${fmt.ratio(a.previousCombinedAlphaPerformance)}`
+          }
+        />
+        <Metric
+          label="Value Factor"
+          value={fmt.ratio(a.valueFactor)}
+          hint={`${a.submissionDays} of ${a.valueFactorDays} submission days`}
+          tone={a.submissionDays >= a.valueFactorDays ? 'neutral' : 'warn'}
+        />
+        <Metric
+          label="Mean prod corr"
+          value={fmt.ratio(a.meanProdCorrelation)}
+          hint={`most consultants ${fmt.ratio(a.peerMeanProdCorrelation)}`}
+          tone={
+            a.meanProdCorrelation == null
+              ? 'muted'
+              : a.meanProdCorrelation <= a.peerMeanProdCorrelation
+                ? 'profit'
+                : 'warn'
+          }
+        />
+        <Metric
+          label="Power Pool perf."
+          value={fmt.ratio(a.combinedPowerPoolPerformance)}
+          tone={signTone(a.combinedPowerPoolPerformance)}
+          hint={`Osmosis rank ${fmt.ratio(a.dailyOsmosisRank)}`}
+        />
+      </div>
+      {a.flags.length > 0 && (
+        <Notice tone="warn" className="mt-3">
+          <ul className="list-disc pl-4">
+            {a.flags.map((f) => (
+              <li key={f}>{f}</li>
+            ))}
+          </ul>
+        </Notice>
+      )}
+      {pay.days > 0 && (
+        <div className="mt-3 flex flex-col gap-1 text-body text-ink-subtle">
+          <p>
+            Base payment over the last {pay.windowDays} days: {fmt.ratio(pay.average)} a day on
+            average across {pay.days} paid days.
+          </p>
+          <p>
+            By Alphas submitted that day:{' '}
+            {pay.byCount
+              .map((b) => `${b.alphas} → ${fmt.ratio(b.average)} (${b.days} d)`)
+              .join(' · ')}
+          </p>
+          <p>
+            With a theme Alpha: {fmt.ratio(pay.themeDays.average)} ({pay.themeDays.days} d) ·
+            without: {fmt.ratio(pay.otherDays.average)} ({pay.otherDays.days} d)
+          </p>
+        </div>
+      )}
+    </Panel>
+  )
+}
+
 function Quantity({ report }: { report: BasePaymentReport }) {
   const q = report.quantity
   const peak = Math.max(1, ...q.recent.map((d) => d.count))
@@ -390,7 +478,8 @@ function Checklist({ report }: { report: BasePaymentReport }) {
       </ul>
       {!report.multipliersKnown && (
         <p className="mt-2 text-body text-ink-subtle">
-          BRAIN's pyramid multipliers could not be read just now, so theme alignment is not scored.
+          BRAIN's pyramid multipliers could not be read just now, so pyramid multipliers are not
+          scored. Themes are still read from each Alpha's own MATCHES_THEMES check.
         </p>
       )}
     </Panel>
@@ -418,6 +507,7 @@ export function BasePaymentScreen() {
         <Skeleton className="h-64" />
       ) : (
         <>
+          <Account report={report} />
           <Quantity report={report} />
           <Today report={report} />
           <Checklist report={report} />
@@ -435,8 +525,10 @@ export function BasePaymentScreen() {
               <p>
                 The articles give no formula and no amounts, so this screen reports figures and
                 thresholds, not a payment estimate. Submit Advisor scores now carry a few points for
-                the same levers: a pyramid multiplier above 1x, margin below 4 bps, under 70% Sharpe
-                kept in the sub-universe, and concentration. They rank; they never override a check.
+                the same levers: a matched theme (BRAIN's MATCHES_THEMES check), a pyramid
+                multiplier above 1x, margin below 4 bps, under 70% Sharpe kept in the sub-universe,
+                and concentration. Production correlation is a fifth of the score. They rank; they
+                never override a check.
               </p>
               <p>
                 Not here: do not pre-mix uncorrelated Alphas into one, and never add noise to pass a
