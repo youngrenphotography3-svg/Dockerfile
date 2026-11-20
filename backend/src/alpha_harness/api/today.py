@@ -4,15 +4,18 @@ One endpoint behind the first screen a consultant sees: simulations left today, 
 account can do, and what is left in the assistant's budget. It also drives the onboarding
 flow, which is linear on purpose — sign in, add a key, start.
 
-The true daily simulation limit reaches us only in the response headers of a simulation
-POST, so the figure starts as the configured allowance minus today's runs and is replaced
-by the platform's own number once the first batch comes back. ``exact`` says which one you
-are looking at.
+Simulations left today are the allowance minus what BRAIN's own activity series counts for
+today (``/users/self/activities/simulations``), read at most once a minute. The allowance is
+the x-ratelimit limit header once a simulation POST has returned one; its "remaining" header
+does not track the day's use and only ever lowers the figure. ``exact`` is true when BRAIN's
+count was read, false when the figure is the local count alone.
 """
 
-from datetime import datetime
+import time
+from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 
+import structlog
 from fastapi import APIRouter, Query
 
 from ..brain.filters import PLATFORM_TZ
@@ -24,6 +27,7 @@ from .deps import State
 from .llm import LLMBudget
 
 router = APIRouter(prefix="/api/today", tags=["today"])
+log = structlog.get_logger(__name__)
 
 #: A consultant's daily simulation allowance, shown until the day's first simulation POST
 #: returns its x-ratelimit-* headers.
@@ -275,20 +279,56 @@ async def _you(state: State, session: Any, stored_email: str | None) -> dict[str
     }
 
 
+#: How long BRAIN's own count of today's simulations is reused. The header bar asks every
+#: few seconds while simulations run; BRAIN's activity series only needs reading a minute
+#: at a time.
+ACTIVITY_TTL_SECONDS = 60.0
+_activity: dict[str, Any] = {"at": float("-inf"), "day": None, "count": None}
+
+
+async def brain_used_today(state: State) -> int | None:
+    """Simulations BRAIN has counted today (platform day), or ``None`` if it cannot say."""
+    now = time.monotonic()
+    today = datetime.now(UTC).astimezone(PLATFORM_TZ).date().isoformat()
+    if now - _activity["at"] < ACTIVITY_TTL_SECONDS and _activity["day"] == today:
+        return _activity["count"]
+    try:
+        days = await state.endpoints.simulations_by_day()
+    except Exception:
+        log.warning("today.simulation_activity_failed", exc_info=True)
+        return _activity["count"] if _activity["day"] == today else None
+    count = next((n for d, n in days if d == today), 0 if days else None)
+    _activity.update(at=now, day=today, count=count)
+    return count
+
+
 async def simulations_today(state: State) -> dict[str, Any]:
     allowance = DAILY_ALLOWANCE
     used = await state.tracker.used_today()
     snapshot = await state.tracker.latest_quota()
 
-    # The platform's own figure wins whenever we have one from today.
     exact = False
-    limit, remaining = allowance, max(0, allowance - used)
+    limit = allowance
+    if (
+        snapshot is not None
+        and snapshot.limit_total
+        and snapshot.observed_at
+        and _same_platform_day(snapshot.observed_at)
+    ):
+        limit = snapshot.limit_total
+    # BRAIN's own count of today's simulations is what the allowance is spent against. The
+    # x-ratelimit "remaining" header is not (it read 5,000 after 1,709 runs on 2026-11-20), so
+    # it only ever lowers the figure, never raises it. The local count covers the gap
+    # between BRAIN's reads and anything run since.
+    counted = await brain_used_today(state)
+    if counted is not None:
+        exact = True
+        used = max(used, counted)
+    remaining = max(0, limit - used)
     if snapshot is not None and snapshot.remaining is not None:
         observed = snapshot.observed_at
         if observed and _same_platform_day(observed):
-            exact = True
-            limit = snapshot.limit_total or allowance
-            remaining = snapshot.remaining
+            remaining = min(remaining, snapshot.remaining)
 
     resets_in = seconds_until_reset(tz=PLATFORM_TZ)
     engine = await state.engine.status()
@@ -299,7 +339,7 @@ async def simulations_today(state: State) -> dict[str, Any]:
 
     return {
         "limit": limit,
-        "used": used if not exact else max(0, limit - remaining),
+        "used": used,
         "remaining": remaining,
         "queued": queued,
         "unspoken": unspoken,
