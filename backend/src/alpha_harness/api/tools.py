@@ -11,7 +11,7 @@ like any lab.
 import asyncio
 import json
 import time
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any, Literal, Self
 
 import structlog
@@ -502,7 +502,7 @@ async def _submitted_rows(state: State) -> list[dict[str, Any]]:
     sql = (
         "SELECT a.alpha_id, a.sim_type, a.region, a.delay, a.universe, a.neutralization, "  # noqa: S608
         "a.sharpe, a.turnover, a.margin, a.status, a.date_submitted, a.pyramids, "
-        "a.prod_correlation, a.self_correlation, a.checks "
+        "a.prod_correlation, a.self_correlation, a.test_sharpe, a.checks "
         f"FROM alpha a WHERE {SUBMITTED}"
     )
     rows = await state.alphas.catalog.query(sql)
@@ -743,7 +743,12 @@ async def base_payment_report(state: State) -> dict[str, Any]:
     div = base_payment.diversity(submitted, now)
     grow = base_payment.growth(submitted, now)
     days = await state.alphas.daily_pnl([str(r["alpha_id"]) for r in submitted])
-    osm = await asyncio.to_thread(base_payment.osmosis, submitted, days, now)
+    figures = await _account_figures(state)
+    payments = figures[2]
+    # BRAIN refuses Osmosis points for Alphas submitted before compensation began, which the
+    # base-payment history dates: its first paid day.
+    compensated_from = date.fromisoformat(min(d for d, _ in payments)) if payments else None
+    osm = await asyncio.to_thread(base_payment.osmosis, submitted, days, now, compensated_from)
 
     recommended = [
         {
@@ -771,7 +776,7 @@ async def base_payment_report(state: State) -> dict[str, Any]:
 
     recent = base_payment.recent_rows(submitted, now, 30)
     table = await _multipliers(state)
-    health = base_payment.account_health(*(await _account_figures(state)), submitted, now)
+    health = base_payment.account_health(*figures, submitted, now)
     return {
         "quantity": qty,
         "diversity": div,

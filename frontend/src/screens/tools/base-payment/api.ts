@@ -62,6 +62,8 @@ export interface OsmosisAlpha {
 export interface OsmosisScope {
   scope: string
   submitted: number
+  /** Submitted Alphas BRAIN accepts Osmosis points for. */
+  eligible: number
   ready: boolean
   needed: number
   alphas: OsmosisAlpha[]

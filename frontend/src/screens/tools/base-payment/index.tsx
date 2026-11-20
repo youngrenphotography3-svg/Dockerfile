@@ -453,10 +453,12 @@ function OsmosisPanel({ report }: { report: BasePaymentReport }) {
         )}
       </div>
       <p className="mt-3 text-body text-ink-subtle">
-        Points follow Sharpe, discounted for turnover over 20% and margin under 4 bps, capped at 15%
-        an Alpha, with the weaker of any pair moving together (PnL correlation of 0.70 or more) left
-        out. The guide also says to drop Alphas that lose about 60% of Sharpe under investability
-        limits; that figure isn't held here, so check it on BRAIN.
+        Points follow the weaker of each Alpha's in-sample and test-years Sharpe, scaled down for
+        turnover over 20% and margin under 4 bps, capped at 15% an Alpha, with the weaker of any
+        pair moving together (PnL correlation of 0.70 or more) left out. Alphas submitted before
+        your compensation began are left out (BRAIN refuses points for them), as are Alphas whose
+        test years are at or below Sharpe 0.5. The guide also says to drop Alphas that lose about
+        60% of Sharpe under investability limits; that figure isn't held here, so check it on BRAIN.
       </p>
     </Panel>
   )

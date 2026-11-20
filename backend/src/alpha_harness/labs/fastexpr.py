@@ -522,6 +522,12 @@ def validate(
             if count < info.required or (info.maximum is not None and count > info.maximum):
                 problems.append(f"{node.value} does not take {count} inputs.")
             problems.extend(_window_problems(node, info))
+            if (
+                (need := REQUIRED_KEYWORDS.get(node.value))
+                and count < info.required + 1
+                and not any(k.lower() == need.lower() for k, _ in node.kwargs)
+            ):
+                problems.append(f"{node.value} needs {need}= written out; BRAIN refuses it bare.")
         elif (
             node.kind == "name"
             # A keyword value names an option (``driver=gaussian``), not a data field.
@@ -534,6 +540,12 @@ def validate(
     problems.extend(_used_before_defined(tree, assigned))
     problems.extend(_unused_assignments(tree))
     return problems
+
+
+#: Keyword inputs BRAIN refuses to default although the definition shows one (2026-11-20):
+#: ``truncate(x)`` and ``ts_delta_limit(x, y)`` fail with "Required attribute ... must have a
+#: value", and in a batch that one refusal cancels the other nine simulations.
+REQUIRED_KEYWORDS = {"truncate": "maxPercent", "ts_delta_limit": "limit_volume"}
 
 
 #: Inputs BRAIN requires to be a positive whole number of days, by the name the operator's

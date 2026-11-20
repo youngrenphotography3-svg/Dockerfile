@@ -155,3 +155,54 @@ def test_daily_plan_does_not_lift_a_weak_theme_alpha() -> None:
     rec = [_rec("A", 26, "USA"), _rec("T", 12.5, "GLB", 3.29)]
     ids = [p["alphaId"] for p in bp.daily_plan(rec, qty)["picks"]]
     assert ids == ["A"]
+
+
+def test_osmosis_skips_alphas_brain_refuses_and_weighs_test_years() -> None:
+    from datetime import date
+
+    def sub(i: int, *, days_ago: int, sharpe: float, test: float | None) -> dict:
+        return {
+            "alpha_id": f"O{i:02d}",
+            "region": "USA",
+            "delay": 1,
+            "status": "ACTIVE",
+            "sharpe": sharpe,
+            "test_sharpe": test,
+            "turnover": 0.1,
+            "margin": 0.001,
+            "date_submitted": NOW - timedelta(days=days_ago),
+        }
+
+    rows = [sub(i, days_ago=10 + i, sharpe=2.0, test=2.0) for i in range(10)]
+    rows += [sub(50, days_ago=200, sharpe=3.5, test=3.5)]  # before compensation began
+    rows += [sub(51, days_ago=5, sharpe=3.0, test=0.2)]  # faded in the test years
+    start = (NOW - timedelta(days=150)).date()
+    plan = bp.osmosis(rows, {}, NOW, compensated_from=start)
+    usa = next(s for s in plan["scopes"] if s["scope"] == "USA/D1")
+    ids = {a["alphaId"] for a in usa["alphas"]}
+    assert "O50" not in ids and "O51" not in ids and len(ids) == 10
+    reasons = {d["alphaId"]: d["reason"] for d in usa["dropped"]}
+    assert "compensation" in reasons["O50"] and "Test-years" in reasons["O51"]
+    assert sum(a["points"] for a in usa["alphas"]) == bp.OSMOSIS_POINTS
+    # The weaker of IS and test years counts, and heavy turnover is scaled down.
+    assert bp._osmosis_weight({"sharpe": 3.4, "test_sharpe": 1.7}) == 1.7
+    heavy = bp._osmosis_weight({"sharpe": 2.0, "test_sharpe": 2.0, "turnover": 0.4})
+    assert abs(heavy - 1.0) < 1e-9
+    assert bp.osmosis_eligible(rows[0], None) is None
+    assert date(2026, 1, 1) < start
+
+
+def test_operators_brain_refuses_bare_are_kept_out_of_batches() -> None:
+    from alpha_harness.labs import fastexpr
+
+    assert {"truncate", "ts_delta_limit"} <= search.EXCLUDED
+    table = fastexpr.operator_table(
+        [
+            {"name": "truncate", "definition": "truncate(x,maxPercent=0.01)"},
+            {"name": "rank", "definition": "rank(x, rate=2)"},
+        ]
+    )
+    bare = fastexpr.validate(fastexpr.parse("truncate(rank(close))"), table, {"close"})
+    assert any("maxPercent" in p for p in bare)
+    named = fastexpr.parse("truncate(rank(close), maxPercent=0.05)")
+    assert fastexpr.validate(named, table, {"close"}) == []
