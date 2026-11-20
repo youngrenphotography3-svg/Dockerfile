@@ -45,6 +45,8 @@ V_ALPHA_SUMMARY = "4.0"
 
 #: Daily submitted-Alpha counts, the series behind BRAIN's own "Submitted Alphas".
 SUBMISSIONS_PATH = "/users/self/activities/submissions"
+#: Simulations run per day, as BRAIN counts them against the daily allowance.
+SIMULATIONS_ACTIVITY_PATH = "/users/self/activities/simulations"
 #: The daily base payment, in the account's currency, as BRAIN's Payments page charts it.
 BASE_PAYMENT_PATH = "/users/self/activities/base-payment"
 #: Genius level, the quarter's combined performances, Osmosis allocations.
@@ -423,6 +425,22 @@ class BrainEndpoints:
             (str(r[0]), int(r[1]))
             for r in rows
             if isinstance(r, list) and len(r) >= 2 and str(r[1]).lstrip("-").isdigit()
+        ]
+
+    async def simulations_by_day(self) -> list[tuple[str, int]]:
+        """Simulations BRAIN counted per day, as ``(date, count)`` oldest first. The same
+        undocumented envelope as submissions: ``{records: {records: [[date, n], ...]}}``.
+
+        This is the figure the daily allowance is spent against. The ``x-ratelimit-*``
+        headers of a simulation POST are not: on 2026-11-20 they still read 5,000 left
+        after 1,709 simulations that day.
+        """
+        body = (await self.client.request_retrying("GET", SIMULATIONS_ACTIVITY_PATH)).body
+        rows = ((body or {}).get("records") or {}).get("records") or []
+        return [
+            (str(r[0]), int(r[1]))
+            for r in rows
+            if isinstance(r, list) and len(r) >= 2 and isinstance(r[1], (int, float))
         ]
 
     async def base_payment_days(self) -> list[tuple[str, float]]:
