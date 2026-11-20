@@ -61,6 +61,10 @@ OSMOSIS_STEP = 100
 OSMOSIS_CORRELATION = 0.70
 #: "Avoid alphas with turnover above 20% unless their investability-constrained Sharpe holds".
 OSMOSIS_TURNOVER = 0.20
+#: Without a test period, the headline Sharpe counts at this share.
+OSMOSIS_NO_TEST = 0.75
+#: At or below this test-years Sharpe an Alpha takes no Osmosis points.
+OSMOSIS_MIN_TEST_SHARPE = 0.5
 
 #: Weight changes the Submit Advisor applies on top of its 0-100 score, and no more: the
 #: score ranks, it never overrides a check.
@@ -351,15 +355,43 @@ def _next_lock(now: datetime) -> str:
 
 
 def _osmosis_weight(row: dict[str, Any]) -> float:
-    """A transparent merit: Sharpe, discounted for the traits the Osmosis guide warns about."""
-    weight = max(num(row.get("sharpe")) or 0.0, 0.1)
+    """A transparent merit: the weaker of the in-sample and test-years Sharpe, discounted for
+    the traits the Osmosis guide warns about.
+
+    Osmosis scores the combo out of sample, so an Alpha's test years are the better guide:
+    an IS Sharpe of 3+ that halves in the test years earns the test figure. With no test
+    period the headline is discounted, never trusted whole. Turnover above 20% is scaled by
+    ``0.2 / turnover``, so an Alpha trading twice as much carries half the weight.
+    """
+    sharpe = num(row.get("sharpe")) or 0.0
+    test = num(row.get("test_sharpe"))
+    weight = min(sharpe, test) if test is not None else sharpe * OSMOSIS_NO_TEST
+    weight = max(weight, 0.1)
     turnover = num(row.get("turnover"))
     if turnover is not None and turnover > OSMOSIS_TURNOVER:
-        weight *= 0.7
+        weight *= OSMOSIS_TURNOVER / turnover
     margin = num(row.get("margin"))
     if margin is not None and margin < MIN_MARGIN:
-        weight *= 0.7
+        weight *= 0.5
     return weight
+
+
+def osmosis_eligible(row: dict[str, Any], compensated_from: date | None) -> str | None:
+    """Why BRAIN would refuse Osmosis points for this Alpha, or ``None``.
+
+    BRAIN answers "Cannot update Osmosis points for non-compensated alpha" for Alphas
+    submitted before the account's compensation began (2026-11-20: every one before the
+    first base-payment day). An Alpha whose test years lost money is left out too: points
+    on it only drag the combo.
+    """
+    if compensated_from is not None:
+        moment = as_platform_time(row.get("date_submitted"))
+        if moment is not None and moment.date() < compensated_from:
+            return "Submitted before compensation began; BRAIN refuses Osmosis points for it"
+    test = num(row.get("test_sharpe"))
+    if test is not None and test <= OSMOSIS_MIN_TEST_SHARPE:
+        return f"Test-years Sharpe {test:.2f}: the edge has not held up"
+    return None
 
 
 def _capped_shares(weights: list[float], cap: float) -> list[float]:
@@ -432,16 +464,25 @@ def osmosis(
     rows: Sequence[dict[str, Any]],
     days: dict[str, dict[date, float]],
     now: datetime,
+    compensated_from: date | None = None,
 ) -> dict[str, Any]:
     """A proposed 100,000-point split per scope, for every scope with enough Alphas.
 
     BRAIN takes the allocation only through its own Alphas table, so this proposes and the
-    CSV is what to copy across; nothing is sent.
+    CSV is what to copy across; nothing is sent. Only Alphas BRAIN accepts points for are
+    counted (:func:`osmosis_eligible`); a scope is ready with ten of those.
     """
     scopes: dict[str, list[dict[str, Any]]] = {}
+    ineligible: dict[str, list[dict[str, str]]] = {}
     for row in rows:
         status = str(row.get("status") or "").upper()
         if status == "DECOMMISSIONED":
+            continue
+        if reason := osmosis_eligible(row, compensated_from):
+            ineligible.setdefault(scope_of(row), []).append(
+                {"alphaId": str(row["alpha_id"]), "reason": reason}
+            )
+            scopes.setdefault(scope_of(row), [])
             continue
         scopes.setdefault(scope_of(row), []).append(row)
 
@@ -450,11 +491,12 @@ def osmosis(
         ranked = sorted(members, key=lambda r: (-_osmosis_weight(r), str(r["alpha_id"])))
         entry: dict[str, Any] = {
             "scope": scope,
-            "submitted": len(members),
+            "submitted": len(members) + len(ineligible.get(scope, [])),
+            "eligible": len(members),
             "ready": len(members) >= OSMOSIS_MIN_ALPHAS,
             "needed": max(0, OSMOSIS_MIN_ALPHAS - len(members)),
             "alphas": [],
-            "dropped": [],
+            "dropped": list(ineligible.get(scope, [])),
         }
         if entry["ready"]:
             kept, why = _decorrelate(ranked, days)
@@ -483,7 +525,7 @@ def osmosis(
                 }
                 for r, p in zip(kept, points, strict=True)
             ]
-            entry["dropped"] = [
+            entry["dropped"] += [
                 {"alphaId": a, "reason": reason}
                 for a, reason in why.items()
                 if a not in refilled and a not in {str(r["alpha_id"]) for r in kept}

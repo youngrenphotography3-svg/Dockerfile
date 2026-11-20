@@ -68,6 +68,11 @@ EXCLUDED = frozenset(
         "regression_proj",
         "vec_choose",
         "group_cartesian_product",
+        # BRAIN now refuses these without their keyword ("Required attribute maxpercent /
+        # limit_volume must have a value"), and one refused child cancels its whole batch of
+        # ten: 2026-11-20, 530 of 720 Search Lab simulations in KOR/TWN/GLB were lost so.
+        "truncate",
+        "ts_delta_limit",
     }
 )
 
