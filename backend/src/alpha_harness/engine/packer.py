@@ -40,6 +40,9 @@ class BatchKey:
     delay: int
     language: str
     mode: str = FULL_MODE
+    #: A smaller batch size for rows BRAIN failed for using too much resource. Part of the
+    #: key, so capped rows never share a batch with uncapped ones.
+    cap: int = MAX_BATCH
 
     def describe(self) -> str:
         return (
@@ -79,7 +82,7 @@ class BatchKey:
         # and the task's cores (at most three) are what bounds them.
         if self.region_agnostic or self.sim_type == SimulationType.SUPER:
             return 1
-        return MAX_BATCH
+        return max(1, min(MAX_BATCH, self.cap))
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,8 +108,8 @@ class Batch:
         return [item.record_id for item in self.items]
 
 
-def key_of(payload: dict[str, Any]) -> BatchKey:
-    """Derive the batch key from a simulation request body."""
+def key_of(payload: dict[str, Any], cap: int | None = None) -> BatchKey:
+    """Derive the batch key from a simulation request body, and the row's batch cap."""
     settings = payload.get("settings") or {}
     return BatchKey(
         sim_type=str(payload.get("type", "REGULAR")),
@@ -115,7 +118,30 @@ def key_of(payload: dict[str, Any]) -> BatchKey:
         delay=int(settings.get("delay", 1)),
         language=str(settings.get("language", "FASTEXPR")),
         mode=str(settings.get("simulationMode") or FULL_MODE),
+        cap=MAX_BATCH if cap is None else max(1, int(cap)),
     )
+
+
+#: BRAIN's message for a multi-simulation whose children together outran its budget. The
+#: alphas are fine; sent in smaller batches they run.
+RESOURCE_MESSAGE = "too much resource"
+
+
+def is_resource_failure(message: str | None) -> bool:
+    """Whether ``message`` is BRAIN's too-much-resource failure."""
+    return bool(message) and RESOURCE_MESSAGE in str(message).lower()
+
+
+def smaller_cap(batch_size: int, current_cap: int | None) -> int | None:
+    """The batch cap to retry a resource-failed child with, or ``None`` to give up.
+
+    Halves the size the batch actually had (10 -> 5 -> 2 -> 1). A child that failed alone
+    is a real failure: no smaller batch exists.
+    """
+    size = min(batch_size, current_cap or MAX_BATCH)
+    if size <= 1:
+        return None
+    return max(1, size // 2)
 
 
 def pack(
