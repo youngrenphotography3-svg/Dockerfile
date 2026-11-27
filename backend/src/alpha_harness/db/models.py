@@ -190,6 +190,9 @@ class SimulationRecord(Base):
     message: Mapped[str | None] = mapped_column(Text)
     #: Times reconcile queued this row again after its send's answer was lost.
     orphan_requeues: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    #: Most siblings this row may share a multi-simulation with. Set when BRAIN failed its
+    #: batch for using too much resource: the row is queued again in a smaller batch.
+    batch_cap: Mapped[int | None] = mapped_column(Integer)
 
     created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow, index=True)
     submitted_at: Mapped[datetime | None] = mapped_column(UtcDateTime)

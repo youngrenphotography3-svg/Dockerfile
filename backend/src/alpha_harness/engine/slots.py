@@ -54,9 +54,11 @@ from .packer import (
     WorkItem,
     allocate_slots,
     demand_by_task,
+    is_resource_failure,
     key_of,
     match_children,
     pack,
+    smaller_cap,
 )
 
 if TYPE_CHECKING:
@@ -567,7 +569,7 @@ class BatchEngine:
             items = [
                 WorkItem(
                     record_id=r.id,
-                    key=key_of(r.payload or {}),
+                    key=key_of(r.payload or {}, r.batch_cap),
                     task=r.task,
                     payload=r.payload or {},
                 )
@@ -1000,12 +1002,15 @@ class BatchEngine:
         if not settled:
             if resolved:
                 await self._finish_children(
-                    [r for r in open_rows if r.id in resolved], resolved, outcomes
+                    [r for r in open_rows if r.id in resolved],
+                    resolved,
+                    outcomes,
+                    batch_size=len(child_ids),
                 )
                 await self.tracker.notify()
             return
 
-        await self._finish_children(open_rows, resolved, outcomes)
+        await self._finish_children(open_rows, resolved, outcomes, batch_size=len(child_ids))
         async with self.db.session() as session:
             # Its children are all in, so it no longer holds a slot on BRAIN either. A
             # cancel that already ended it wins this compare-and-set.
@@ -1072,11 +1077,18 @@ class BatchEngine:
         *,
         fallback_message: str | None = None,
         child_status: SimStatus = SimStatus.ERROR,
+        batch_size: int = 1,
     ) -> None:
         landed: list[str] = []
+        split = 0
         async with self.db.session() as session:
             for record in records:
                 found = resolved.get(record.id)
+                if found is not None and await self._split_resource_failure(
+                    session, record, outcomes[found["platform_id"]], batch_size
+                ):
+                    split += 1
+                    continue
                 if found is None:
                     message = (
                         fallback_message or "BRAIN did not report a result for this simulation."
@@ -1100,6 +1112,43 @@ class BatchEngine:
         # ever be judged submittable.
         for alpha_id in landed:
             self.tracker.alpha_landed(alpha_id)
+        if split:
+            log.warning("engine.resource_split", children=split, batch_size=batch_size)
+
+    async def _split_resource_failure(
+        self, session: Any, record: SimulationRecord, outcome: Outcome, batch_size: int
+    ) -> bool:
+        """Queue a child again in a smaller batch when BRAIN failed it for using too much
+        resource. Returns True if the row was queued again rather than finished.
+
+        BRAIN budgets a multi-simulation as a whole: ten heavy children (vector fields over
+        long windows) fail together with "Your simulation probably took too much resource",
+        while the same alphas in a batch of four run. Halving the batch until a child runs
+        alone means only an alpha that is too heavy by itself ends as a failure.
+        """
+        if outcome.status not in (SimStatus.ERROR, SimStatus.FAILED):
+            return False
+        if outcome.alpha_id is not None or not is_resource_failure(outcome.message):
+            return False
+        cap = smaller_cap(batch_size, record.batch_cap)
+        if cap is None:
+            return False
+        moved = await transition(
+            session,
+            record.id,
+            from_=ACTIVE,
+            status=SimStatus.QUEUED,
+            batch_cap=cap,
+            parent_record_id=None,
+            platform_id=None,
+            platform_status=None,
+            progress=None,
+            submitted_at=None,
+            sent_at=None,
+            message=f"BRAIN ran out of resource on a batch of {batch_size}; "
+            f"queued again in batches of {cap}.",
+        )
+        return bool(moved)
 
     async def _mark_expanded(self, parent_id: int) -> None:
         async with self.db.session() as session:
