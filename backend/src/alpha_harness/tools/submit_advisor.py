@@ -46,6 +46,14 @@ FULL_HEADROOM = 0.6
 EASY_TURNOVER = 0.30
 #: Most Alphas the advisor puts forward. BRAIN takes four a day, so ten is a few days' worth.
 MAX_RECOMMENDED = 10
+#: Most dataset categories an Alpha may touch and still count toward a pyramid: "Pyramid Alphas
+#: are Alphas that contribute to a maximum of 2 pyramids" (BRAIN Genius). One touching three or
+#: more counts toward none -- measured on this account, 23 of 121 regular Q4 2026 submissions
+#: earned no pyramid credit that way -- so it is held back rather than spending a daily slot.
+PYRAMID_CAP = 2
+#: At or under this many operators, an Alpha that sits in one category is *lean*: the kind
+#: that pulls the Genius tie-breakers (operators and fields per Alpha) down.
+LEAN_OPERATORS = 3
 
 #: What each part of the score is worth, out of 100. Distinctness from production carries
 #: as much as fitness: the Quality Factor rewards low correlation to BRAIN's Alphas, and of
@@ -178,6 +186,49 @@ def score(alpha: dict[str, Any]) -> tuple[float, list[str], list[str]]:
     return round(total, 1), strengths, cautions
 
 
+def pyramid_categories(alpha: dict[str, Any]) -> list[str] | None:
+    """The dataset categories of the Alpha's pyramids (``ASI/D1/OTHER`` -> ``OTHER``).
+
+    ``None`` when the vault has not read its pyramids yet, which is not the same as none.
+    """
+    pyramids = alpha.get("pyramids")
+    if pyramids is None:
+        return None
+    return sorted({str(p).rsplit("/", 1)[-1].upper() for p in pyramids if "/" in str(p)})
+
+
+def genius_notes(alpha: dict[str, Any]) -> tuple[list[str], list[str], list[str]]:
+    """``(problems, strengths, cautions)`` from the Genius pyramid and tie-breaker rules.
+
+    A problem holds the Alpha back: past :data:`PYRAMID_CAP` categories it earns no pyramid
+    credit. The rest only inform.
+    """
+    problems: list[str] = []
+    strengths: list[str] = []
+    cautions: list[str] = []
+    categories = pyramid_categories(alpha)
+    raw = alpha.get("operatorCount")
+    operators = raw if isinstance(raw, int) and not isinstance(raw, bool) else None
+    if categories is None:
+        cautions.append("Pyramids not read yet, so its pyramid credit is unchecked")
+    elif len(categories) > PYRAMID_CAP:
+        problems.append(
+            f"Touches {len(categories)} data categories ({', '.join(categories)}): BRAIN gives "
+            f"pyramid credit only to Alphas in at most {PYRAMID_CAP}, so it counts toward none"
+        )
+    if (
+        operators is not None
+        and operators <= LEAN_OPERATORS
+        and categories is not None
+        and len(categories) <= 1
+    ):
+        strengths.append(
+            f"Lean: {operators} operator{'s' if operators != 1 else ''} in one category, which "
+            "lowers the Genius operators- and fields-per-Alpha tie-breakers"
+        )
+    return problems, strengths, cautions
+
+
 def _within_bars(alpha: dict[str, Any]) -> list[str]:
     """Bars BRAIN checks that the stored figures already show missed, for a ready Alpha."""
     problems: list[str] = []
@@ -247,15 +298,26 @@ def advise(
         elif alpha.get("pending"):
             value, strengths, cautions = score(alpha)
             value, strengths, cautions = adjusted(alpha_id, value, strengths, cautions)
-            cautions = ["BRAIN has not finished its checks on it", *cautions]
+            genius_problems, genius_good, genius_bad = genius_notes(alpha)
+            cautions = [
+                "BRAIN has not finished its checks on it",
+                *genius_problems,
+                *cautions,
+                *genius_bad,
+            ]
+            strengths = [*strengths, *genius_good]
             out.append(Advice(alpha_id, "needs_check", value, strengths, cautions))
         else:
             problems = _within_bars(alpha)
             prod = _num(alpha.get("prodCorrelation"))
             if prod is not None and prod >= CEILING:
                 problems.append(f"Production Correlation {prod:.2f} is at or over {CEILING}")
+            genius_problems, genius_good, genius_bad = genius_notes(alpha)
+            problems += genius_problems
             value, strengths, cautions = score(alpha)
             value, strengths, cautions = adjusted(alpha_id, value, strengths, cautions)
+            strengths = [*strengths, *genius_good]
+            cautions = [*cautions, *genius_bad]
             if problems:
                 out.append(Advice(alpha_id, "held_back", value, strengths, problems + cautions))
             else:

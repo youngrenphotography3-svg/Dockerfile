@@ -611,6 +611,10 @@ async def _advice(state: State) -> tuple[list[AdvisedAlpha], dict[str, Any]]:
     for r in candidates:
         alpha_id = str(r["alphaId"])
         vault = stored.get(alpha_id) or {}
+        # The Genius pyramid cap and the lean tie-breaker read these. ``None`` pyramids means
+        # the vault has not read them yet, which the advisor tells apart from "none".
+        r["pyramids"] = json_list(vault["pyramids"]) if vault.get("pyramids") is not None else None
+        r["operatorCount"] = vault.get("operator_count")
         multiplier = _multiplier_of(json_list(vault.get("pyramids")), table)
         multipliers[alpha_id] = multiplier
         checks = checks_of(vault.get("checks"))

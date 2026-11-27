@@ -140,6 +140,44 @@ def test_score_is_bounded() -> None:
     assert 0 <= low[0] < top[0] <= 100
 
 
+def test_three_categories_earn_no_pyramid_credit_and_are_held_back() -> None:
+    wide = alpha("WIDE", pyramids=["GLB/D1/PV", "GLB/D1/OTHER", "GLB/D1/MODEL"])
+    two = alpha("TWO", pyramids=["GLB/D1/PV", "GLB/D1/OTHER"])
+    got = by_id(sa.advise([wide, two], {}))
+    assert got["WIDE"].status == "held_back"
+    assert any("counts toward none" in c for c in got["WIDE"].cautions)
+    assert got["TWO"].status == "recommended"
+
+
+def test_cap_counts_categories_not_pyramid_names() -> None:
+    # The same category in two spellings of one pyramid is still one category.
+    same = alpha("SAME", pyramids=["ASI/D1/OTHER", "ASI/D1/other", "ASI/D1/ANALYST"])
+    assert sa.pyramid_categories(same) == ["ANALYST", "OTHER"]
+    assert sa.advise([same], {})[0].status == "recommended"
+
+
+def test_unread_pyramids_are_not_read_as_safe_or_as_wide() -> None:
+    unread = alpha("UNREAD")
+    got = sa.advise([unread], {})[0]
+    assert got.status == "recommended"
+    assert any("pyramid credit is unchecked" in c for c in got.cautions)
+
+
+def test_lean_alpha_is_named_a_strength() -> None:
+    lean = alpha("LEAN", pyramids=["GLB/D1/OTHER"], operatorCount=1)
+    heavy = alpha("HEAVY", pyramids=["GLB/D1/OTHER"], operatorCount=8)
+    got = by_id(sa.advise([lean, heavy], {}))
+    assert any(s.startswith("Lean: 1 operator ") for s in got["LEAN"].strengths)
+    assert not any(s.startswith("Lean") for s in got["HEAVY"].strengths)
+
+
+def test_pending_wide_alpha_is_warned_not_recommended() -> None:
+    wide = alpha("PWIDE", pending=True, pyramids=["USA/D1/PV", "USA/D1/MODEL", "USA/D1/OTHER"])
+    got = sa.advise([wide], {})[0]
+    assert got.status == "needs_check"
+    assert any("counts toward none" in c for c in got.cautions)
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
