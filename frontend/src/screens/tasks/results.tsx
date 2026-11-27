@@ -31,6 +31,7 @@ import {
   TRUNCATION,
   taskStatus,
 } from '@/screens/tasks/columns'
+import { ExportResults } from '@/screens/tasks/export'
 import { Button, Empty, ErrorNotice, KV, Metric, Page, PageHeader, Panel, Skeleton } from '@/ui/kit'
 import { type Column, DataTable, type Sort } from '@/ui/table'
 
@@ -250,10 +251,13 @@ export function TaskResultsScreen() {
             : 'Every Alpha this task produced'
         }
         actions={
-          <Button variant="ghost" render={<Link to="/tasks" />}>
-            <ArrowLeftIcon />
-            Back to Tasks
-          </Button>
+          <>
+            <ExportResults taskId={id} disabled={!rows.length} />
+            <Button variant="ghost" render={<Link to="/tasks" />}>
+              <ArrowLeftIcon />
+              Back to Tasks
+            </Button>
+          </>
         }
       />
 

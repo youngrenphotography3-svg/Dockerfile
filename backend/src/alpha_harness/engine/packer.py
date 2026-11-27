@@ -132,6 +132,21 @@ def is_resource_failure(message: str | None) -> bool:
     return bool(message) and RESOURCE_MESSAGE in str(message).lower()
 
 
+def is_silent_batch_failure(message: str | None, batch_size: int) -> bool:
+    """Whether a child of a real batch failed with no message at all.
+
+    BRAIN sometimes fails every child of a multi-simulation together and says nothing.
+    Seen only on batches, never on an alpha sent alone, so it is treated like the resource
+    failure: split the batch, and an alpha that still fails silently alone is a real failure.
+    """
+    return batch_size > 1 and not (message or "").strip()
+
+
+def should_split(message: str | None, batch_size: int) -> bool:
+    """Whether a failed child is retried in a smaller batch: resource, or silent in a batch."""
+    return is_resource_failure(message) or is_silent_batch_failure(message, batch_size)
+
+
 def smaller_cap(batch_size: int, current_cap: int | None) -> int | None:
     """The batch cap to retry a resource-failed child with, or ``None`` to give up.
 

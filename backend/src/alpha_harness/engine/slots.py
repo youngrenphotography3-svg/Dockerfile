@@ -54,10 +54,10 @@ from .packer import (
     WorkItem,
     allocate_slots,
     demand_by_task,
-    is_resource_failure,
     key_of,
     match_children,
     pack,
+    should_split,
     smaller_cap,
 )
 
@@ -1128,7 +1128,7 @@ class BatchEngine:
         """
         if outcome.status not in (SimStatus.ERROR, SimStatus.FAILED):
             return False
-        if outcome.alpha_id is not None or not is_resource_failure(outcome.message):
+        if outcome.alpha_id is not None or not should_split(outcome.message, batch_size):
             return False
         cap = smaller_cap(batch_size, record.batch_cap)
         if cap is None:
@@ -1145,8 +1145,12 @@ class BatchEngine:
             progress=None,
             submitted_at=None,
             sent_at=None,
-            message=f"BRAIN ran out of resource on a batch of {batch_size}; "
-            f"queued again in batches of {cap}.",
+            message=(
+                f"BRAIN ran out of resource on a batch of {batch_size}; "
+                if (outcome.message or "").strip()
+                else f"BRAIN failed a batch of {batch_size} without a reason; "
+            )
+            + f"queued again in batches of {cap}.",
         )
         return bool(moved)
 

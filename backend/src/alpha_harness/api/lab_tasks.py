@@ -14,6 +14,7 @@ from typing import Annotated, Any, Literal
 
 import structlog
 from fastapi import APIRouter, Query
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, select, update
 
@@ -44,6 +45,7 @@ from ..tasks import Task
 from ..tools import power_pool
 from ..tools.submission_planner import ESCAPE
 from ..vault.yields import checks_of, clean, is_submitted, verdict
+from . import task_export
 from .deps import State, refuse
 
 log = structlog.get_logger(__name__)
@@ -767,6 +769,32 @@ async def top(
         )
         for r in ranked(best, current)
     ]
+
+
+@router.get("/{task_id}/export", response_model=None)
+async def export(
+    task_id: int,
+    state: State,
+    fmt: Annotated[task_export.ExportFormat, Query(alias="format")] = "md",
+    limit: Annotated[int, Query(ge=1, le=5000)] = 300,
+) -> PlainTextResponse | dict[str, Any]:
+    """The task and its distinct Alphas, best first, as one file to hand to an LLM.
+
+    Markdown (default) is the compact one to paste; CSV and JSON carry every column. Reads
+    only what the harness already holds: like ``top`` it asks BRAIN for nothing.
+    """
+    task = await _payload(state, task_id)
+    rows = await top(task_id, state, limit)
+    out = task_export.render(task, rows, fmt)
+    if isinstance(out, dict):
+        return out
+    media = "text/csv" if fmt == "csv" else "text/markdown"
+    filename = f"task-{task_id}-results.{fmt}"
+    return PlainTextResponse(
+        out,
+        media_type=f"{media}; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 #: Verdicts that let an Alpha into the Power Pool on correlation.
