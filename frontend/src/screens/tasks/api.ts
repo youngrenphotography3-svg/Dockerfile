@@ -21,6 +21,8 @@ export type TaskAlpha = Omit<Schemas['TaskAlpha'], 'settings'> & {
 export type PowerPoolCorrelation = Schemas['PowerPoolCorrelation']
 export type PowerPoolRow = Schemas['PowerPoolRow']
 
+export type ExportFormat = 'md' | 'csv' | 'json'
+
 const B = '/api/lab-tasks'
 
 export const labTasks = {
@@ -37,6 +39,14 @@ export const labTasks = {
     http.patch<LabTask>(`${B}/${id}`, body),
   remove: (id: number) => http.del<Schemas['TaskRemoved']>(`${B}/${id}`),
   top: (id: number, limit = 50) => http.get<RankedAlpha[]>(`${B}/${id}/top${qs({ limit })}`),
+  /**
+   * The task and its distinct Alphas, best first, as one file to hand to Claude. Markdown is
+   * the compact one to paste; CSV and JSON carry every column. Asks BRAIN for nothing.
+   */
+  export: async (id: number, format: ExportFormat, limit = 1000): Promise<string> => {
+    const out = await http.get<unknown>(`${B}/${id}/export${qs({ format, limit })}`)
+    return typeof out === 'string' ? out : `${JSON.stringify(out, null, 2)}\n`
+  },
   /** Every Alpha from every task that nothing refuses: each check PASS, WARNING or PENDING. */
   submittable: () => http.get<TaskAlpha[]>(`${B}/submittable`),
   /** Measured locally against the submitted Power Pool, from the PnL already stored. */

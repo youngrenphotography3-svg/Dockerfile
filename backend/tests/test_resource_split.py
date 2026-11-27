@@ -7,8 +7,10 @@ from alpha_harness.engine.packer import (
     MAX_BATCH,
     WorkItem,
     is_resource_failure,
+    is_silent_batch_failure,
     key_of,
     pack,
+    should_split,
     smaller_cap,
 )
 
@@ -23,6 +25,18 @@ def test_brain_message_is_recognised() -> None:
     assert is_resource_failure("Your simulation probably took too much resource.")
     assert not is_resource_failure("Unknown variable")
     assert not is_resource_failure(None)
+
+
+def test_silent_batch_failure_splits_only_in_a_batch() -> None:
+    assert is_silent_batch_failure("", 10)
+    assert is_silent_batch_failure(None, 2)
+    assert is_silent_batch_failure("   ", 4)
+    assert not is_silent_batch_failure("", 1)
+    assert not is_silent_batch_failure("Unknown variable", 10)
+    assert should_split("", 10)
+    assert should_split("Your simulation probably took too much resource.", 1)
+    assert not should_split("", 1)
+    assert not should_split("Unknown variable", 10)
 
 
 def test_cap_halves_down_to_alone_then_gives_up() -> None:
@@ -53,6 +67,7 @@ def test_capped_rows_pack_in_small_batches_apart_from_others() -> None:
 
 if __name__ == "__main__":
     test_brain_message_is_recognised()
+    test_silent_batch_failure_splits_only_in_a_batch()
     test_cap_halves_down_to_alone_then_gives_up()
     test_uncapped_key_is_unchanged()
     test_capped_rows_pack_in_small_batches_apart_from_others()

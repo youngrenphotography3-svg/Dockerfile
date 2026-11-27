@@ -979,6 +979,29 @@ export interface paths {
         patch: operations["change_api_lab_tasks__task_id__patch"];
         trace?: never;
     };
+    "/api/lab-tasks/{task_id}/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Export
+         * @description The task and its distinct Alphas, best first, as one file to hand to an LLM.
+         *
+         *     Markdown (default) is the compact one to paste; CSV and JSON carry every column. Reads
+         *     only what the harness already holds: like ``top`` it asks BRAIN for nothing.
+         */
+        get: operations["export_api_lab_tasks__task_id__export_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/lab-tasks/{task_id}/name": {
         parameters: {
             query?: never;
@@ -7575,6 +7598,40 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["LabTask"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    export_api_lab_tasks__task_id__export_get: {
+        parameters: {
+            query?: {
+                format?: "md" | "csv" | "json";
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                task_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */

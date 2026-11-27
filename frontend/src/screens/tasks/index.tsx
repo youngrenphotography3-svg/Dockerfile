@@ -34,6 +34,7 @@ import {
   taskStatus,
 } from '@/screens/tasks/columns'
 import { resultsMarkdown } from '@/screens/tasks/copy'
+import { ExportResults } from '@/screens/tasks/export'
 import { SubmittableAlphas } from '@/screens/tasks/submittable'
 import {
   Badge,
@@ -713,6 +714,7 @@ function TaskDetail({
             <CopyIcon />
             Copy Results
           </Button>
+          <ExportResults taskId={task.id} disabled={!found.length} />
           <TaskBadge task={task} />
         </>
       }
